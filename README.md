@@ -60,7 +60,7 @@ flowchart LR
 		Auth -->|HTTPS and WebSocket| Frontend[Chainlit frontend in VNet]
 		Frontend -->|Private Link| Safety[Azure AI Content Safety]
 		Frontend -->|Private Link| Search[Foundry Web Search]
-		Search --> GroundingModel[gpt-5-mini]
+		Search --> GroundingModel[gpt-4.1-nano]
 		Frontend -->|internal HTTPS and API key| Inference[Apertus vLLM]
 		Inference -->|Private Link and NFS| Files[Premium Azure Files model cache]
 		ACR[Premium ACR and artifact streaming] -->|Private image pulls| Frontend
@@ -132,7 +132,7 @@ The four starter experiences are:
 - Azure CLI 2.54 or newer, Azure Developer CLI, Git, and OpenSSL on POSIX.
 - An Azure subscription where you can create resources and role assignments.
 - `Consumption-GPU-NC24-A100` quota in Sweden Central.
-- Data Zone Standard quota for `gpt-5-mini` in Sweden Central.
+- Global Standard quota for `gpt-4.1-nano` in Sweden Central.
 - A Hugging Face account that accepted the Apertus terms and a read-only token.
 - A single-tenant Microsoft Entra app registration and permission to update its
 	redirect URI. Its client secret is copied into Key Vault and then cleared from

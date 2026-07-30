@@ -6,7 +6,7 @@ Before `azd up`, verify:
 
 1. `Consumption-GPU-NC24-A100` is listed in Sweden Central and the subscription
    has at least one available GPU replica.
-2. The selected Foundry deployment has Data Zone Standard quota.
+2. The selected Foundry deployment has Global Standard `gpt-4.1-nano` quota.
 3. The Apertus model terms are accepted and its exact Hugging Face commit is
    pinned in `APERTUS_MODEL_REVISION`.
 4. The active Container Apps GPU driver supports the digest-pinned CUDA 13

@@ -43,7 +43,7 @@ class Settings:
             content_safety_endpoint=_required("CONTENT_SAFETY_ENDPOINT").rstrip("/"),
             foundry_project_endpoint=_required("FOUNDRY_PROJECT_ENDPOINT").rstrip("/"),
             foundry_grounding_model=os.getenv(
-                "FOUNDRY_GROUNDING_MODEL", "gpt-5-mini"
+                "FOUNDRY_GROUNDING_MODEL", "gpt-4.1-nano-grounding"
             ),
             content_safety_threshold=int(
                 os.getenv("CONTENT_SAFETY_THRESHOLD", "4")

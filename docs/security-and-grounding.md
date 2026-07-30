@@ -29,11 +29,16 @@ Safety checks include:
   operating language for that preview API.
 
 Grounding uses Foundry Web Search, backed by Grounding with Bing, with low search
-context, low GPT-5 reasoning effort, low verbosity, and bounded output. Recent
-conversation turns resolve follow-ups before retrieval. The model is instructed
-to answer from the delimited evidence and user media. Exact Web Search URLs are
-returned when available. This reduces unsupported claims but cannot prove that a
-neural model never relies on learned weights.
+context and bounded `gpt-4.1-nano` output. Recent conversation turns resolve
+follow-ups before retrieval. The model is instructed to answer from the
+delimited evidence and user media. Exact Web Search URLs are returned when
+available. This reduces unsupported claims but cannot prove that a neural model
+never relies on learned weights.
+
+The separate Grounding with Bing Search agent tool is not used. New Bing
+resources are suspended in this subscription, and benchmark calls through the
+existing resource failed authentication after taking longer than the successful
+Foundry Web Search path.
 
 ## Audio Exception
 

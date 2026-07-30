@@ -13,7 +13,7 @@ The Bicep deployment creates one Sweden Central resource group containing:
 | Storage account and Azure Files | Persistent Hugging Face and vLLM caches |
 | Key Vault | Hugging Face token, vLLM API key, and operator health token |
 | Managed identities | Frontend system identity for SDK calls; separate user identities for ACR and Key Vault |
-| Foundry account and project | Adaptive Bing-backed Web Search and `gpt-5-mini` grounding deployment |
+| Foundry account and project | Adaptive Bing-backed Web Search and GlobalStandard `gpt-4.1-nano` grounding deployment |
 | Content Safety account | Text, image, Prompt Shields, and groundedness checks |
 | Log Analytics and Application Insights | Platform logs, application telemetry, and dependencies |
 | VNet and dedicated subnets | ACA infrastructure and isolated private endpoints |
@@ -43,7 +43,7 @@ Tasks while managed-identity image pulls use Private Link.
 2. Content Safety checks text, images, and prompt attacks. Raw audio bypasses
    content moderation by explicit design.
 3. Requests involving changing information or explicit web verification call
-   Foundry Web Search once with low reasoning and recent conversation context.
+   Foundry Web Search once with `gpt-4.1-nano` and recent conversation context.
 4. Prompt Shields checks retrieved evidence for indirect injection. Source URLs
    are included when available but are not required to continue.
 5. Apertus receives the evidence, recent turns, media, and profile settings on the one vLLM

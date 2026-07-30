@@ -86,6 +86,29 @@ async def test_profiles_use_same_endpoint_with_different_template_flags():
     assert "tools" not in thinking_call
 
 
+@pytest.mark.asyncio
+async def test_stable_identity_prompt_has_no_tools_and_identifies_apertus():
+    client = FakeClient()
+    gateway = VllmGateway(
+        base_url="http://internal-apertus/v1",
+        api_key="secret",
+        model="swiss-ai/Apertus-v1.5-8B",
+        client=client,
+    )
+
+    await gateway.complete(
+        request=ChatRequest(text="Who are you?"),
+        profile=ChatProfile.TOOLS,
+        grounding=GroundingPacket(summary=""),
+        search_web=search_web,
+    )
+
+    request = client.chat.completions.calls[0]
+    assert "tools" not in request
+    assert "Apertus v1.5 8B" in request["messages"][0]["content"]
+    assert "not ChatGPT" in request["messages"][0]["content"]
+
+
 def test_builds_current_vllm_image_and_audio_parts():
     request = ChatRequest(
         text="Compare the attachments",

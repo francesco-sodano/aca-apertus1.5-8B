@@ -17,7 +17,7 @@ $env:MODEL_ID = 'swiss-ai/Apertus-v1.5-8B'
 $env:VLLM_API_KEY = '<vllm-api-key>'
 $env:CONTENT_SAFETY_ENDPOINT = 'https://<account>.cognitiveservices.azure.com'
 $env:FOUNDRY_PROJECT_ENDPOINT = 'https://<account>.services.ai.azure.com/api/projects/<project>'
-$env:FOUNDRY_GROUNDING_MODEL = 'gpt-5-mini'
+$env:FOUNDRY_GROUNDING_MODEL = 'gpt-4.1-nano-grounding'
 $env:MODEL_HEALTH_TOKEN = '<operator-health-token>'
 uv run chainlit run app.py --host 127.0.0.1 --port 8000
 ```

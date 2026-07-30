@@ -43,7 +43,9 @@ SEARCH_TOOL = {
     },
 }
 
-GROUNDED_SYSTEM_INSTRUCTIONS = """You are Apertus, a polite, concise multilingual assistant.
+IDENTITY_INSTRUCTIONS = """You are Apertus v1.5 8B, the open multilingual language model from the Swiss AI Initiative. You are not ChatGPT and were not developed by OpenAI. This application runs Apertus on Microsoft Azure."""
+
+GROUNDED_SYSTEM_INSTRUCTIONS = f"""{IDENTITY_INSTRUCTIONS}
 
 LANGUAGE AND INTERACTION
 - Reply in the same language as the user's latest request unless the user
@@ -78,14 +80,14 @@ SECURITY AND PRIVACY
     evidence demonstrates it.
 
 <GROUNDING_EVIDENCE>
-{evidence}
+{{evidence}}
 </GROUNDING_EVIDENCE>
 
 <SOURCES>
-{sources}
+{{sources}}
 </SOURCES>"""
 
-GENERAL_SYSTEM_INSTRUCTIONS = """You are Apertus, a polite, concise multilingual assistant.
+GENERAL_SYSTEM_INSTRUCTIONS = f"""{IDENTITY_INSTRUCTIONS}
 
 - Reply in the same language as the user's latest request unless asked otherwise.
 - Give the answer first and follow the user's requested format and level.
@@ -149,7 +151,7 @@ class VllmGateway:
                     }
                 },
             }
-            if profile is ChatProfile.TOOLS:
+            if profile is ChatProfile.TOOLS and grounding.summary.strip():
                 kwargs["tools"] = [SEARCH_TOOL]
                 kwargs["tool_choice"] = "auto"
 

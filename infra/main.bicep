@@ -37,7 +37,7 @@ param alertEmail string
 param monthlyBudgetAmount int = 500
 
 @minValue(1)
-@description('Data Zone Standard capacity for the Foundry grounding model deployment.')
+@description('Global Standard capacity for the Foundry grounding model deployment.')
 param groundingModelCapacity int = 10
 
 @description('Tags applied to all resources.')
@@ -98,7 +98,9 @@ var inferenceAppName = take('ca-${environmentName}-inference', 32)
 var virtualNetworkName = take('vnet-${environmentName}', 64)
 var modelShareName = 'model-cache'
 var modelStorageName = 'model-cache'
-var groundingDeploymentName = 'gpt-5-mini'
+var groundingDeploymentName = 'gpt-4.1-nano-grounding'
+var groundingModelName = 'gpt-4.1-nano'
+var groundingModelVersion = '2025-04-14'
 var bootstrapImage = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest@sha256:e9b3e7c34664c7cffd7144864b0e4eec369bfde80068f9095dc63b37058bec48'
 var mcapsDiagnosticStorageName = toLower('mcaps${substring(replace(subscription().subscriptionId, '-', ''), 16)}')
 
@@ -351,13 +353,13 @@ module aiServices 'br/public:avm/res/cognitive-services/account:0.17.0' = {
       {
         model: {
           format: 'OpenAI'
-          name: groundingDeploymentName
-          version: '2025-08-07'
+          name: groundingModelName
+          version: groundingModelVersion
         }
         name: groundingDeploymentName
         sku: {
           capacity: groundingModelCapacity
-          name: 'DataZoneStandard'
+          name: 'GlobalStandard'
         }
         versionUpgradeOption: 'NoAutoUpgrade'
       }
@@ -567,6 +569,7 @@ module frontendApp './modules/app/frontend-container-app.bicep' = {
     modelEndpoint: 'https://${inferenceApp.outputs.fqdn}/v1'
     contentSafetyEndpoint: contentSafety.outputs.endpoint
     foundryProjectEndpoint: 'https://${foundryAccountName}.services.ai.azure.com/api/projects/${foundryProjectName}'
+    foundryGroundingModel: groundingDeploymentName
     appInsightsConnectionString: applicationInsights.outputs.connectionString
     configureApplicationSecrets: applicationSecretsReady
     entraClientId: entraClientId

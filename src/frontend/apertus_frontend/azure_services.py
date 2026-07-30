@@ -167,34 +167,37 @@ class FoundryWebSearchGateway:
 
         async def request() -> dict[str, Any]:
             token = await self._credential.get_token(FOUNDRY_SCOPE)
+            request_body: dict[str, Any] = {
+                "model": self._model,
+                "instructions": (
+                    "Search the web and return only concise factual evidence "
+                    "useful for another model. Keep the response under 400 words."
+                ),
+                "input": query,
+                "max_output_tokens": 600,
+                "include": ["web_search_call.action.sources"],
+                "tool_choice": "required",
+                "tools": [
+                    {
+                        "type": "web_search",
+                        "search_context_size": "low",
+                        "user_location": {
+                            "type": "approximate",
+                            "country": "SE",
+                            "city": "Stockholm",
+                            "region": "Stockholm County",
+                        },
+                    }
+                ],
+            }
+            if self._model.startswith("gpt-5"):
+                request_body.update(
+                    {"reasoning": {"effort": "low"}, "text": {"verbosity": "low"}}
+                )
             response = await self._client.post(
                 f"{self._project_endpoint}/openai/v1/responses",
                 headers={"Authorization": f"Bearer {token.token}"},
-                json={
-                    "model": self._model,
-                    "instructions": (
-                        "Search the web and return only concise factual evidence "
-                        "useful for another model. Keep the response under 400 words."
-                    ),
-                    "input": query,
-                    "reasoning": {"effort": "low"},
-                    "text": {"verbosity": "low"},
-                    "max_output_tokens": 600,
-                    "include": ["web_search_call.action.sources"],
-                    "tool_choice": "required",
-                    "tools": [
-                        {
-                            "type": "web_search",
-                            "search_context_size": "low",
-                            "user_location": {
-                                "type": "approximate",
-                                "country": "SE",
-                                "city": "Stockholm",
-                                "region": "Stockholm County",
-                            },
-                        }
-                    ],
-                },
+                json=request_body,
             )
             response.raise_for_status()
             return response.json()

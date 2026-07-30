@@ -8,6 +8,7 @@ param keyVaultUri string
 param modelEndpoint string
 param contentSafetyEndpoint string
 param foundryProjectEndpoint string
+param foundryGroundingModel string
 param appInsightsConnectionString string
 param configureApplicationSecrets bool
 param entraClientId string
@@ -91,7 +92,7 @@ resource frontendApp 'Microsoft.App/containerApps@2025-01-01' = {
             }
             {
               name: 'FOUNDRY_GROUNDING_MODEL'
-              value: 'gpt-5-mini'
+              value: foundryGroundingModel
             }
             {
               name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'

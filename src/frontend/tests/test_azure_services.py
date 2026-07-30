@@ -1,8 +1,30 @@
+from types import SimpleNamespace
+
+import pytest
+
 from apertus_frontend.azure_services import (
+    FoundryWebSearchGateway,
     _blocked_category,
     _extract_foundry_result,
 )
 from apertus_frontend.pipeline import Citation
+
+
+class FakeCredential:
+    async def get_token(self, *scopes, **kwargs):
+        return SimpleNamespace(token="token")
+
+
+class RecordingClient:
+    def __init__(self):
+        self.body = None
+
+    async def post(self, url, *, headers, json, params=None):
+        self.body = json
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {"output_text": "Evidence", "output": []},
+        )
 
 
 def test_extracts_foundry_text_and_unique_citations():
@@ -118,3 +140,29 @@ def test_content_safety_threshold_is_inclusive():
 
     assert _blocked_category(payload, 4) == "Violence severity 4"
     assert _blocked_category(payload, 6) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "expects_reasoning"),
+    [
+        ("gpt-4.1-nano-grounding", False),
+        ("gpt-5-nano-grounding", True),
+    ],
+)
+async def test_web_search_uses_model_compatible_latency_controls(
+    model, expects_reasoning
+):
+    client = RecordingClient()
+    gateway = FoundryWebSearchGateway(
+        project_endpoint="https://foundry.example/api/projects/test",
+        model=model,
+        credential=FakeCredential(),
+        client=client,
+    )
+
+    await gateway.search("Current information")
+
+    assert ("reasoning" in client.body) is expects_reasoning
+    assert ("text" in client.body) is expects_reasoning
+    assert client.body["tools"][0]["search_context_size"] == "low"
