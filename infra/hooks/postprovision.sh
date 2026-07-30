@@ -10,11 +10,32 @@ set -euo pipefail
 : "${SERVICE_FRONTEND_NAME:?Missing azd output SERVICE_FRONTEND_NAME}"
 : "${SERVICE_FRONTEND_URI:?Missing azd output SERVICE_FRONTEND_URI}"
 : "${SERVICE_INFERENCE_NAME:?Missing azd output SERVICE_INFERENCE_NAME}"
+: "${AZURE_ENV_NAME:?Missing AZURE_ENV_NAME}"
 : "${ENTRA_CLIENT_ID:?ENTRA_CLIENT_ID is required}"
 : "${ENTRA_TENANT_ID:?ENTRA_TENANT_ID is required}"
 
-image_tag="${APERTUS_IMAGE_TAG:-1.5.0-$(git rev-parse --short=12 HEAD 2>/dev/null || echo local)}"
+inference_source_tag="$(git rev-parse --short=12 HEAD:src/inference 2>/dev/null || echo local)"
+image_tag="${APERTUS_IMAGE_TAG_OVERRIDE:-1.5.0-${AZURE_ENV_NAME}-${inference_source_tag}}"
 inference_repository='apertus/inference'
+acr_build_window_open='false'
+
+cleanup_failed_postprovision() {
+  local status="$?"
+  trap - EXIT
+  if [[ "${status}" -ne 0 && "${acr_build_window_open}" == 'true' ]]; then
+    echo 'Postprovision failed; restoring the private ACR posture.' >&2
+    if ! az acr update \
+      --name "${AZURE_CONTAINER_REGISTRY_NAME}" \
+      --allow-exports false \
+      --public-network-enabled false \
+      --default-action Deny \
+      --output none; then
+      echo 'CRITICAL: failed to restore the private ACR posture.' >&2
+    fi
+  fi
+  exit "${status}"
+}
+trap cleanup_failed_postprovision EXIT
 
 # Bootstrap secrets are now in Key Vault; remove source copies from local azd state.
 azd env set APPLICATION_SECRETS_READY true >/dev/null
@@ -62,6 +83,7 @@ az acr update \
   --public-network-enabled true \
   --default-action Allow \
   --output none
+acr_build_window_open='true'
 
 acr_data_plane_ready='false'
 for attempt in $(seq 1 6); do
@@ -227,5 +249,6 @@ az containerapp update \
   --set-env-vars 'VLLM_API_KEY=secretref:vllm-api-key' 'MODEL_HEALTH_TOKEN=secretref:model-health-token' \
   --output none
 
-azd env set APERTUS_IMAGE_TAG "${image_tag}" >/dev/null
+azd env set APERTUS_IMAGE_TAG '' >/dev/null
+azd env set ROTATE_APPLICATION_SECRETS false >/dev/null
 echo 'Inference image promoted and frontend secrets configured successfully.'

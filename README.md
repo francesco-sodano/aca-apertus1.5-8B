@@ -36,8 +36,8 @@ policies before serving production traffic.
 
 ## Prerequisites
 
-- [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) 2.54 or
-  newer, [Azure Developer CLI](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd),
+- A current [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli)
+  and [Azure Developer CLI](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd),
   Git, Docker, and OpenSSL on POSIX systems.
 - An Azure subscription where you can create resources, role assignments,
   private endpoints, private DNS zones, and a delegated Container Apps subnet.
@@ -206,62 +206,300 @@ Raw audio is the explicit safety exception: MIME type and size are validated,
 but Azure AI Content Safety does not inspect its spoken content in this design.
 Do not enable audio where policy requires audio moderation.
 
-## Deploy Apertus v1.5 8B to Azure Container Apps
+## Install Apertus v1.5 8B on Azure
 
-This repository implements one deployment target only:
-`swiss-ai/Apertus-v1.5-8B` on Azure Container Apps serverless A100 GPU. It does
-not include VM, AKS, or 70B deployment instructions.
+This repository deploys one configuration: `swiss-ai/Apertus-v1.5-8B` on an
+Azure Container Apps serverless A100 profile in Sweden Central. The commands
+below use PowerShell 7. Equivalent Bash hooks are included for Linux and macOS.
 
-Authenticate and create the single-tenant Entra application used by the
-frontend:
+### 1. Install the local tools
+
+Install and sign in with current versions of:
+
+- [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli), including
+  support for `az acr artifact-streaming` and Container Apps commands.
+- [Azure Developer CLI](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd).
+- Git, Docker, and PowerShell 7. Linux and macOS also require OpenSSL.
+
+Verify the commands before continuing:
+
+```powershell
+az version
+azd version
+git --version
+docker version
+az acr artifact-streaming --help
+```
+
+### 2. Confirm access and capacity
+
+Before deployment, confirm all of the following:
+
+- You can create resources and role assignments in the target subscription.
+  `Owner`, or `Contributor` plus `User Access Administrator`, is sufficient.
+- Your tenant permits you to create a single-tenant Entra app registration.
+- Sweden Central reports `Consumption-GPU-NC24-A100`, and the subscription has
+  capacity for one replica.
+- The subscription has at least 10 Global Standard units for `gpt-4.1-nano` in
+  Sweden Central.
+- You accepted the Apertus terms on Hugging Face and created a read-only token.
+- You reviewed the Grounding with Bing data-boundary terms described in
+  [Prerequisites](#prerequisites).
+
+Check the serverless GPU profile:
+
+```powershell
+az containerapp env workload-profile list-supported `
+  --location swedencentral `
+  --query "[?name=='Consumption-GPU-NC24-A100']" `
+  --output table
+```
+
+### 3. Clone the repository
+
+```powershell
+git clone https://github.com/francesco-sodano/aca-apertus1.5-8B.git
+Set-Location aca-apertus1.5-8B
+```
+
+### 4. Choose the deployment values
+
+Replace each angle-bracket value. The environment name must contain 5-24
+lowercase letters, numbers, or hyphens and must start and end with a letter or
+number.
+
+```powershell
+$environmentName = '<environment-name>'
+$subscriptionId = '<subscription-id>'
+$resourceGroup = '<resource-group-name>'
+$operationsEmail = '<operations-email>'
+$monthlyBudget = '500'
+$huggingFaceToken = '<read-only-hugging-face-token>'
+```
+
+Use a new, dedicated resource group for this deployment. Do not target a group
+that contains unrelated resources; teardown is designed to remove the complete
+installation.
+
+Resolve and review the current model commit. Pinning the commit makes later
+deployments reproducible:
+
+```powershell
+$modelRevision = (Invoke-RestMethod `
+  'https://huggingface.co/api/models/swiss-ai/Apertus-v1.5-8B').sha
+$modelRevision
+```
+
+### 5. Sign in to Azure
 
 ```powershell
 az login
+az account set --subscription $subscriptionId
 azd auth login
 
-$tenantId = az account show --query tenantId -o tsv
-$clientId = az ad app create `
-  --display-name apertus-chainlit `
-  --sign-in-audience AzureADMyOrg `
-  --query appId -o tsv
-az ad sp create --id $clientId
-$clientSecret = az ad app credential reset `
-  --id $clientId `
-  --display-name apertus-container-app `
-  --query password -o tsv
+$tenantId = az account show --query tenantId --output tsv
 ```
 
-Create and configure the azd environment. Replace every angle-bracket value:
+Confirm that `az account show` displays the intended tenant and subscription
+before continuing.
+
+### 6. Create the frontend Entra application
+
+This is required once for each installation. The deployment hook adds the final
+Container Apps callback URL after Azure creates the frontend endpoint.
 
 ```powershell
-azd env new <environment-name>
-azd env set AZURE_SUBSCRIPTION_ID <subscription-id>
-azd env set AZURE_RESOURCE_GROUP <resource-group>
+$clientId = az ad app create `
+  --display-name "apertus-$environmentName" `
+  --sign-in-audience AzureADMyOrg `
+  --query appId `
+  --output tsv
+
+az ad sp create --id $clientId --output none
+
+$clientSecret = az ad app credential reset `
+  --id $clientId `
+  --display-name 'apertus-container-app' `
+  --query password `
+  --output tsv
+```
+
+Keep `$clientSecret` in the current terminal. Do not write it to a file or
+commit it.
+
+### 7. Create the azd environment
+
+```powershell
+azd env new $environmentName
+azd env set AZURE_SUBSCRIPTION_ID $subscriptionId
+azd env set AZURE_RESOURCE_GROUP $resourceGroup
 azd env set AZURE_LOCATION swedencentral
-azd env set APERTUS_MODEL_REVISION <hugging-face-commit-sha>
+azd env set APERTUS_MODEL_REVISION $modelRevision
 azd env set ACCEPT_APERTUS_LICENSE true
 azd env set ACCEPT_BING_GROUNDING_TERMS true
-azd env set HF_TOKEN <read-only-hugging-face-token>
+azd env set HF_TOKEN $huggingFaceToken
 azd env set ENTRA_TENANT_ID $tenantId
 azd env set ENTRA_CLIENT_ID $clientId
 azd env set ENTRA_CLIENT_SECRET $clientSecret
-azd env set ALERT_EMAIL <operations-email>
-azd env set MONTHLY_BUDGET_AMOUNT 500
+azd env set ALERT_EMAIL $operationsEmail
+azd env set MONTHLY_BUDGET_AMOUNT $monthlyBudget
+```
+
+The deployment derives globally unique ACR, Storage, Key Vault, Foundry, and
+Content Safety names from the subscription, resource group, and azd environment.
+Do not set resource names unless your organization requires specific globally
+unique names. Optional overrides are:
+
+- `AZURE_CONTAINER_REGISTRY_NAME`
+- `AZURE_STORAGE_ACCOUNT_NAME`
+- `AZURE_KEY_VAULT_NAME`
+- `AZURE_FOUNDRY_ACCOUNT_NAME`
+- `AZURE_CONTENT_SAFETY_ACCOUNT_NAME`
+
+azd supplies `AZURE_ENV_NAME` and `AZURE_PRINCIPAL_ID`. The preprovision hook
+generates the internal vLLM API key and model-health token. Do not create or set
+those values manually.
+
+### 8. Preview the infrastructure
+
+This step authenticates and evaluates the Bicep deployment without applying it.
+It does not run the deployment hooks or create internal secrets:
+
+```powershell
+azd provision --preview --no-prompt
+```
+
+Review the target subscription, resource group, location, generated names, and
+resource changes. Resolve policy, quota, permission, or naming errors before
+deployment.
+
+### 9. Deploy everything
+
+```powershell
+azd up
+```
+
+`azd up` is the single deployment command. It:
+
+1. Runs preflight validation and generates internal secrets.
+2. Provisions the VNet, private endpoints, identities, RBAC, Container Apps,
+   Foundry, Content Safety, Key Vault, storage, ACR, monitoring, and budget.
+3. Stores bootstrap secrets in Key Vault and clears their local azd values.
+4. Opens a temporary authenticated ACR build window, builds the immutable
+   inference image, and requires successful artifact-stream conversion before
+   promoting it.
+5. Configures Entra authentication and deploys the frontend image.
+6. Restores ACR to private, default-deny, export-disabled operation, enables
+   authenticated ingress, and attempts to prewarm Apertus.
+
+The inference app is intentionally not a normal azd service. The postprovision
+hook promotes it only after artifact-stream conversion succeeds. The first run
+can take 45-90 minutes because it creates private infrastructure, builds and
+converts the large inference image, and loads the model. Repeating `azd up`
+without changes to the committed `src/inference` tree reuses the immutable
+inference image.
+
+### 10. Verify the installation
+
+```powershell
+$frontendUri = azd env get-value SERVICE_FRONTEND_URI
+$registryName = azd env get-value AZURE_CONTAINER_REGISTRY_NAME
+
+Invoke-RestMethod "$frontendUri/healthz"
+Invoke-RestMethod "$frontendUri/healthz/ready"
+
+az acr show `
+  --name $registryName `
+  --query "{publicNetworkAccess:publicNetworkAccess,defaultAction:networkRuleSet.defaultAction,exportPolicy:policies.exportPolicy.status,adminUserEnabled:adminUserEnabled}" `
+  --output table
+
+Start-Process $frontendUri
+```
+
+Both health endpoints must return a JSON status. ACR must report public network
+access disabled, default action `Deny`, exports disabled, and admin disabled.
+The browser must redirect to Microsoft Entra sign-in. After signing in, send one
+prompt to verify that Apertus inference is warm and responding.
+
+### Update the deployment
+
+Commit inference changes before deploying so the inference-tree-derived
+immutable image tag changes. Then run the same deployment command:
+
+```powershell
+git pull
+azd up
+```
+
+For a deliberate inference rebuild without a new Git commit, set a unique tag
+for that run, deploy, and clear the override:
+
+```powershell
+azd env set APERTUS_IMAGE_TAG_OVERRIDE '<unique-tag>'
+azd up
+azd env set APERTUS_IMAGE_TAG_OVERRIDE ''
+```
+
+### Rotate application secrets
+
+Create a fresh Hugging Face token and append a new Entra credential, then run:
+
+```powershell
+$clientId = azd env get-value ENTRA_CLIENT_ID
+$newClientSecret = az ad app credential reset `
+  --id $clientId `
+  --append `
+  --display-name 'apertus-container-app-rotation' `
+  --query password `
+  --output tsv
+
+azd env set HF_TOKEN '<new-read-only-hugging-face-token>'
+azd env set ENTRA_CLIENT_SECRET $newClientSecret
+azd env set ROTATE_APPLICATION_SECRETS true
+azd up
+```
+
+After a successful rotation, the hook clears the source secrets and resets
+`ROTATE_APPLICATION_SECRETS=false`. Remove the old Entra credential only after
+the application is verified.
+
+### Recover from an interrupted deployment
+
+Postprovision failures close the temporary ACR build window automatically. If
+the process is interrupted or frontend deployment fails after the window opens,
+restore ACR explicitly before retrying:
+
+```powershell
+$registryName = azd env get-value AZURE_CONTAINER_REGISTRY_NAME
+az acr update `
+  --name $registryName `
+  --allow-exports false `
+  --public-network-enabled false `
+  --default-action Deny `
+  --output none
 
 azd up
 ```
 
-The hooks build the pinned inference image in ACR, verify artifact-stream
-conversion before promotion, initialize Key Vault references, configure Entra
-authentication, deploy the frontend, close the ACR build window, and prewarm the
-model when a local health token is available. A failed artifact conversion never
-updates the inference app.
+Provisioning, image build, conversion, and promotion are resumable. A failed
+artifact conversion never updates the inference app.
 
-The Hugging Face and Entra bootstrap values are held only in the ignored local
-azd environment long enough to pass them as secure ARM parameters. They are
-cleared after initialization. Existing Key Vault secret versions are preserved
-on later deployments. For an intentional rotation, set
-`ROTATE_APPLICATION_SECRETS=true` and provide fresh source credentials.
+### Remove the installation
+
+Confirm the selected azd environment, subscription, and resource group, then
+remove the deployment:
+
+```powershell
+azd env select $environmentName
+$clientId = azd env get-value ENTRA_CLIENT_ID
+azd down --purge
+az ad app delete --id $clientId
+azd env remove $environmentName --force
+```
+
+`--purge` permanently deletes soft-deleted Key Vault data. Use it only when the
+entire installation must be removed. The Entra application is created outside
+Bicep, so it must be deleted separately after Azure resources are removed.
 
 ## Validate Locally
 
@@ -284,7 +522,7 @@ Running the frontend locally requires Content Safety, Foundry, and an
 OpenAI-compatible Apertus endpoint. See
 [the frontend guide](src/frontend/README.md).
 
-## Operations and Cleanup
+## Operations
 
 - [Inference runtime](src/inference/README.md)
 
@@ -292,13 +530,6 @@ The deployment includes an email action group, a monthly resource-group budget,
 frontend timeout alerts, and inference restart alerts. Admission control limits
 each authenticated principal to six requests per minute and four concurrent
 requests per frontend replica.
-
-To remove the environment, verify the selected azd environment and subscription,
-then run:
-
-```powershell
-azd down --purge
-```
 
 ## License
 

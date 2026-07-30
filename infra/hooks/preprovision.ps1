@@ -8,16 +8,60 @@ function Require-Value([string] $Name) {
     }
 }
 
+function Preserve-AccountNameFromEndpoint(
+    [string] $Name,
+    [string] $EndpointName
+) {
+    if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($Name))) {
+        return
+    }
+    $endpoint = [Environment]::GetEnvironmentVariable($EndpointName)
+    if ([string]::IsNullOrWhiteSpace($endpoint)) {
+        return
+    }
+    $accountName = ([Uri]$endpoint).Host.Split('.')[0]
+    if (-not [string]::IsNullOrWhiteSpace($accountName)) {
+        azd env set $Name $accountName | Out-Null
+        Write-Host "Preserved existing $Name value from $EndpointName."
+    }
+}
+
+function Validate-OptionalName(
+    [string] $Name,
+    [string] $Pattern,
+    [string] $Requirement
+) {
+    $value = [Environment]::GetEnvironmentVariable($Name)
+    if (-not [string]::IsNullOrWhiteSpace($value) -and $value -notmatch $Pattern) {
+        throw "$Name is invalid. $Requirement"
+    }
+}
+
 foreach ($command in @('az', 'azd')) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
         throw "Required command is not installed: $command"
     }
 }
 
+Require-Value 'AZURE_ENV_NAME'
 Require-Value 'APERTUS_MODEL_REVISION'
 Require-Value 'ENTRA_CLIENT_ID'
 Require-Value 'ENTRA_TENANT_ID'
 Require-Value 'ALERT_EMAIL'
+
+if ($env:AZURE_ENV_NAME -notmatch '^[a-z0-9][a-z0-9-]{3,22}[a-z0-9]$') {
+    throw 'AZURE_ENV_NAME must be 5-24 lowercase letters, numbers, or hyphens, and must start and end with a letter or number.'
+}
+
+Preserve-AccountNameFromEndpoint 'AZURE_FOUNDRY_ACCOUNT_NAME' 'FOUNDRY_PROJECT_ENDPOINT'
+Preserve-AccountNameFromEndpoint 'AZURE_CONTENT_SAFETY_ACCOUNT_NAME' 'CONTENT_SAFETY_ENDPOINT'
+
+Validate-OptionalName 'AZURE_CONTAINER_REGISTRY_NAME' '^[a-z0-9]{5,50}$' 'Use 5-50 lowercase letters or numbers.'
+Validate-OptionalName 'AZURE_STORAGE_ACCOUNT_NAME' '^[a-z0-9]{3,24}$' 'Use 3-24 lowercase letters or numbers.'
+Validate-OptionalName 'AZURE_KEY_VAULT_NAME' '^[a-z][a-z0-9-]{1,22}[a-z0-9]$' 'Use 3-24 lowercase letters, numbers, or hyphens; start with a letter and end with a letter or number.'
+Validate-OptionalName 'AZURE_FOUNDRY_ACCOUNT_NAME' '^[a-z][a-z0-9-]{0,62}[a-z0-9]$' 'Use 2-64 lowercase letters, numbers, or hyphens; start with a letter and end with a letter or number.'
+Validate-OptionalName 'AZURE_CONTENT_SAFETY_ACCOUNT_NAME' '^[a-z][a-z0-9-]{0,62}[a-z0-9]$' 'Use 2-64 lowercase letters, numbers, or hyphens; start with a letter and end with a letter or number.'
+Validate-OptionalName 'APERTUS_IMAGE_TAG_OVERRIDE' '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$' 'Use a valid container tag with at most 128 letters, numbers, periods, underscores, or hyphens.'
 
 if ($env:APPLICATION_SECRETS_READY -ne 'true' -or $env:ROTATE_APPLICATION_SECRETS -eq 'true') {
     Require-Value 'HF_TOKEN'

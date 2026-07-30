@@ -11,6 +11,7 @@ foreach ($name in @(
     'SERVICE_FRONTEND_NAME',
     'SERVICE_FRONTEND_URI',
     'SERVICE_INFERENCE_NAME',
+    'AZURE_ENV_NAME',
     'ENTRA_CLIENT_ID',
     'ENTRA_TENANT_ID'
 )) {
@@ -19,10 +20,11 @@ foreach ($name in @(
     }
 }
 
-$gitTag = (git rev-parse --short=12 HEAD 2>$null)
-if ($LASTEXITCODE -ne 0) { $gitTag = 'local' }
-$imageTag = if ($env:APERTUS_IMAGE_TAG) { $env:APERTUS_IMAGE_TAG } else { "1.5.0-$gitTag" }
+$inferenceSourceTag = (git rev-parse --short=12 HEAD:src/inference 2>$null)
+if ($LASTEXITCODE -ne 0) { $inferenceSourceTag = 'local' }
+$imageTag = if ($env:APERTUS_IMAGE_TAG_OVERRIDE) { $env:APERTUS_IMAGE_TAG_OVERRIDE } else { "1.5.0-$($env:AZURE_ENV_NAME)-$inferenceSourceTag" }
 $inferenceRepository = 'apertus/inference'
+$acrBuildWindowOpen = $false
 
 # Bootstrap secrets are now in Key Vault; remove source copies from local azd state.
 azd env set APPLICATION_SECRETS_READY true | Out-Null
@@ -54,11 +56,13 @@ foreach ($identity in @(
     Write-Host "AcrPull confirmed for the $($identity.Name) identity."
 }
 
-# ACR Tasks is Microsoft hosted, so the private registry opens only for the build.
-Write-Host 'Opening the authenticated ACR build window.'
-az acr update --name $env:AZURE_CONTAINER_REGISTRY_NAME `
-    --allow-exports true --public-network-enabled true --default-action Allow --output none
-if ($LASTEXITCODE -ne 0) { throw 'Could not open the authenticated ACR build window.' }
+try {
+    # ACR Tasks is Microsoft hosted, so the private registry opens only for the build.
+    Write-Host 'Opening the authenticated ACR build window.'
+    az acr update --name $env:AZURE_CONTAINER_REGISTRY_NAME `
+        --allow-exports true --public-network-enabled true --default-action Allow --output none
+    if ($LASTEXITCODE -ne 0) { throw 'Could not open the authenticated ACR build window.' }
+    $acrBuildWindowOpen = $true
 
 $acrDataPlaneReady = $false
 for ($attempt = 1; $attempt -le 6; $attempt++) {
@@ -183,5 +187,23 @@ az containerapp update --name $env:SERVICE_FRONTEND_NAME --resource-group $env:A
     --set-env-vars 'VLLM_API_KEY=secretref:vllm-api-key' 'MODEL_HEALTH_TOKEN=secretref:model-health-token' --output none
 if ($LASTEXITCODE -ne 0) { throw 'Frontend secret environment configuration failed.' }
 
-azd env set APERTUS_IMAGE_TAG $imageTag | Out-Null
-Write-Host 'Inference image promoted and frontend secrets configured successfully.'
+    azd env set APERTUS_IMAGE_TAG '' | Out-Null
+    azd env set ROTATE_APPLICATION_SECRETS false | Out-Null
+    Write-Host 'Inference image promoted and frontend secrets configured successfully.'
+}
+catch {
+    $failure = $_
+    if ($acrBuildWindowOpen) {
+        Write-Warning 'Postprovision failed; restoring the private ACR posture.'
+        $previousPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        az acr update --name $env:AZURE_CONTAINER_REGISTRY_NAME `
+            --allow-exports false --public-network-enabled false --default-action Deny --output none
+        $cleanupExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousPreference
+        if ($cleanupExitCode -ne 0) {
+            Write-Warning 'CRITICAL: failed to restore the private ACR posture.'
+        }
+    }
+    throw $failure
+}

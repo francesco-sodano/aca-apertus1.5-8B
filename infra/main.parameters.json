@@ -32,14 +32,29 @@
     "monthlyBudgetAmount": {
       "value": "${MONTHLY_BUDGET_AMOUNT=500}"
     },
+    "containerRegistryName": {
+      "value": "${AZURE_CONTAINER_REGISTRY_NAME=}"
+    },
+    "storageAccountName": {
+      "value": "${AZURE_STORAGE_ACCOUNT_NAME=}"
+    },
+    "keyVaultName": {
+      "value": "${AZURE_KEY_VAULT_NAME=}"
+    },
+    "foundryAccountName": {
+      "value": "${AZURE_FOUNDRY_ACCOUNT_NAME=}"
+    },
+    "contentSafetyAccountName": {
+      "value": "${AZURE_CONTENT_SAFETY_ACCOUNT_NAME=}"
+    },
     "huggingFaceToken": {
       "value": "${HF_TOKEN}"
     },
     "vllmApiKey": {
-      "value": "${VLLM_API_KEY}"
+      "value": "${VLLM_API_KEY=}"
     },
     "modelHealthToken": {
-      "value": "${MODEL_HEALTH_TOKEN}"
+      "value": "${MODEL_HEALTH_TOKEN=}"
     },
     "entraClientSecret": {
       "value": "${ENTRA_CLIENT_SECRET}"

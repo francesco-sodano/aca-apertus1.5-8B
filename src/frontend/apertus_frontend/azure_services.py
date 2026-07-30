@@ -208,12 +208,6 @@ class FoundryWebSearchGateway:
                     {
                         "type": "web_search",
                         "search_context_size": "low",
-                        "user_location": {
-                            "type": "approximate",
-                            "country": "SE",
-                            "city": "Stockholm",
-                            "region": "Stockholm County",
-                        },
                     }
                 ],
             }

@@ -43,30 +43,25 @@ param groundingModelCapacity int = 10
 @description('Tags applied to all resources.')
 param tags object = {}
 
-@minLength(5)
 @maxLength(50)
-@description('Globally unique Azure Container Registry name.')
-param containerRegistryName string = 'crapertusdev'
+@description('Optional globally unique Azure Container Registry name. Leave empty to derive one from the deployment scope.')
+param containerRegistryName string = ''
 
-@minLength(3)
 @maxLength(24)
-@description('Globally unique model-cache storage account name.')
-param storageAccountName string = 'stapertusdev'
+@description('Optional globally unique model-cache storage account name. Leave empty to derive one from the deployment scope.')
+param storageAccountName string = ''
 
-@minLength(3)
 @maxLength(24)
-@description('Globally unique Key Vault name.')
-param keyVaultName string = 'kv-apertus-dev'
+@description('Optional globally unique Key Vault name. Leave empty to derive one from the deployment scope.')
+param keyVaultName string = ''
 
-@minLength(2)
 @maxLength(64)
-@description('Globally unique Microsoft Foundry account and custom subdomain name.')
-param foundryAccountName string = 'fdry-apertus-dev'
+@description('Optional globally unique Microsoft Foundry account and custom subdomain name. Leave empty to derive one from the deployment scope.')
+param foundryAccountName string = ''
 
-@minLength(2)
 @maxLength(64)
-@description('Globally unique Azure AI Content Safety account and custom subdomain name.')
-param contentSafetyAccountName string = 'cs-apertus-dev'
+@description('Optional globally unique Azure AI Content Safety account and custom subdomain name. Leave empty to derive one from the deployment scope.')
+param contentSafetyAccountName string = ''
 
 @secure()
 @description('Read-only Hugging Face token used for the gated Apertus model.')
@@ -86,6 +81,12 @@ param entraClientSecret string = ''
 
 var uniqueSuffix = uniqueString(subscription().subscriptionId, resourceGroup().id, environmentName)
 var compactSuffix = take(uniqueSuffix, 8)
+var globalEnvironmentName = take(toLower(replace(environmentName, '-', '')), 7)
+var resolvedContainerRegistryName = empty(containerRegistryName) ? 'cr${globalEnvironmentName}${uniqueSuffix}' : containerRegistryName
+var resolvedStorageAccountName = empty(storageAccountName) ? 'st${globalEnvironmentName}${uniqueSuffix}' : storageAccountName
+var resolvedKeyVaultName = empty(keyVaultName) ? 'kv-${globalEnvironmentName}-${uniqueSuffix}' : keyVaultName
+var resolvedFoundryAccountName = empty(foundryAccountName) ? 'fdry-${globalEnvironmentName}-${uniqueSuffix}' : foundryAccountName
+var resolvedContentSafetyAccountName = empty(contentSafetyAccountName) ? 'cs-${globalEnvironmentName}-${uniqueSuffix}' : contentSafetyAccountName
 
 var logAnalyticsName = take('log-${environmentName}', 63)
 var appInsightsName = take('appi-${environmentName}', 260)
@@ -160,7 +161,7 @@ module applicationInsights 'br/public:avm/res/insights/component:0.8.0' = {
 module registry 'br/public:avm/res/container-registry/registry:0.12.0' = {
   name: 'container-registry'
   params: {
-    name: containerRegistryName
+    name: resolvedContainerRegistryName
     location: location
     acrAdminUserEnabled: false
     acrSku: 'Premium'
@@ -214,7 +215,7 @@ module registryPrivateEndpoint './modules/network/private-endpoint.bicep' = {
 module keyVault 'br/public:avm/res/key-vault/vault:0.14.0' = {
   name: 'key-vault'
   params: {
-    name: keyVaultName
+    name: resolvedKeyVaultName
     location: location
     enablePurgeProtection: true
     enableRbacAuthorization: true
@@ -288,7 +289,7 @@ module keyVaultPrivateEndpoint './modules/network/private-endpoint.bicep' = {
 module storage 'br/public:avm/res/storage/storage-account:0.33.0' = {
   name: 'model-storage'
   params: {
-    name: storageAccountName
+    name: resolvedStorageAccountName
     location: location
     kind: 'FileStorage'
     skuName: 'Premium_LRS'
@@ -341,10 +342,10 @@ module aiServices 'br/public:avm/res/cognitive-services/account:0.17.0' = {
   name: 'foundry-account'
   params: {
     kind: 'AIServices'
-    name: foundryAccountName
+    name: resolvedFoundryAccountName
     location: location
     allowProjectManagement: true
-    customSubDomainName: foundryAccountName
+    customSubDomainName: resolvedFoundryAccountName
     disableLocalAuth: true
     publicNetworkAccess: 'Disabled'
     restrictOutboundNetworkAccess: false
@@ -392,7 +393,7 @@ module aiServicesPrivateEndpoint './modules/network/private-endpoint.bicep' = {
 }
 
 resource foundryAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' existing = {
-  name: foundryAccountName
+  name: resolvedFoundryAccountName
 }
 
 resource foundryProject 'Microsoft.CognitiveServices/accounts/projects@2025-06-01' = {
@@ -448,9 +449,9 @@ module contentSafety 'br/public:avm/res/cognitive-services/account:0.17.0' = {
   name: 'content-safety'
   params: {
     kind: 'ContentSafety'
-    name: contentSafetyAccountName
+    name: resolvedContentSafetyAccountName
     location: location
-    customSubDomainName: contentSafetyAccountName
+    customSubDomainName: resolvedContentSafetyAccountName
     disableLocalAuth: true
     publicNetworkAccess: 'Disabled'
     restrictOutboundNetworkAccess: false
@@ -562,7 +563,7 @@ module frontendApp './modules/app/frontend-container-app.bicep' = {
     keyVaultUri: keyVault.outputs.uri
     modelEndpoint: 'https://${inferenceApp.outputs.fqdn}/v1'
     contentSafetyEndpoint: contentSafety.outputs.endpoint
-    foundryProjectEndpoint: 'https://${foundryAccountName}.services.ai.azure.com/api/projects/${foundryProjectName}'
+    foundryProjectEndpoint: 'https://${resolvedFoundryAccountName}.services.ai.azure.com/api/projects/${foundryProjectName}'
     foundryGroundingModel: groundingDeploymentName
     appInsightsConnectionString: applicationInsights.outputs.connectionString
     configureApplicationSecrets: applicationSecretsReady
@@ -573,7 +574,7 @@ module frontendApp './modules/app/frontend-container-app.bicep' = {
 }
 
 resource contentSafetyAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' existing = {
-  name: contentSafetyAccountName
+  name: resolvedContentSafetyAccountName
 }
 
 resource frontendFoundryUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
@@ -708,6 +709,8 @@ output AZURE_CONTAINER_REGISTRY_NAME string = registry.outputs.name
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = registry.outputs.loginServer
 output AZURE_KEY_VAULT_NAME string = keyVault.outputs.name
 output AZURE_STORAGE_ACCOUNT_NAME string = storage.outputs.name
+output AZURE_FOUNDRY_ACCOUNT_NAME string = resolvedFoundryAccountName
+output AZURE_CONTENT_SAFETY_ACCOUNT_NAME string = resolvedContentSafetyAccountName
 output AZURE_CONTAINER_APPS_ENVIRONMENT_NAME string = managedEnvironment.outputs.name
 output FRONTEND_IDENTITY_RESOURCE_ID string = frontendIdentity.outputs.resourceId
 output FRONTEND_IDENTITY_PRINCIPAL_ID string = frontendIdentity.outputs.principalId
@@ -717,6 +720,6 @@ output SERVICE_FRONTEND_NAME string = frontendApp.outputs.name
 output SERVICE_FRONTEND_URI string = 'https://${frontendApp.outputs.fqdn}'
 output SERVICE_INFERENCE_NAME string = inferenceApp.outputs.name
 output SERVICE_INFERENCE_FQDN string = inferenceApp.outputs.fqdn
-output FOUNDRY_PROJECT_ENDPOINT string = 'https://${foundryAccountName}.services.ai.azure.com/api/projects/${foundryProjectName}'
+output FOUNDRY_PROJECT_ENDPOINT string = 'https://${resolvedFoundryAccountName}.services.ai.azure.com/api/projects/${foundryProjectName}'
 output CONTENT_SAFETY_ENDPOINT string = contentSafety.outputs.endpoint
 output APPLICATIONINSIGHTS_CONNECTION_STRING string = applicationInsights.outputs.connectionString

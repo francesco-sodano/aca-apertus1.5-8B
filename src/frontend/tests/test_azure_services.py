@@ -200,3 +200,4 @@ async def test_web_search_uses_model_compatible_latency_controls(
     assert "shown directly" in client.body["instructions"]
     assert "requested language" in client.body["instructions"]
     assert client.body["tools"][0]["search_context_size"] == "low"
+    assert "user_location" not in client.body["tools"][0]

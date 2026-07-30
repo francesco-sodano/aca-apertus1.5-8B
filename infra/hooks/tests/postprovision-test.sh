@@ -66,6 +66,7 @@ run_hook() {
   local image_exists="${4:-false}"
   local conversion_exists="${5:-false}"
   local acr_ready_after="${6:-1}"
+  local image_tag_override="${7-test-tag}"
   PATH="${temp_dir}:${PATH}" \
   MOCK_LOG="${log_file}" \
   MOCK_STREAMING_STATUS="${status}" \
@@ -75,6 +76,7 @@ run_hook() {
   MOCK_ACR_READY_AFTER="${acr_ready_after}" \
   AZURE_CONTAINER_REGISTRY_NAME='testregistry' \
   AZURE_CONTAINER_REGISTRY_ENDPOINT='testregistry.azurecr.io' \
+  AZURE_ENV_NAME='test-env' \
   AZURE_KEY_VAULT_NAME='test-vault' \
   AZURE_RESOURCE_GROUP='test-rg' \
   SERVICE_FRONTEND_NAME='test-frontend' \
@@ -88,7 +90,7 @@ run_hook() {
   ENTRA_CLIENT_ID='00000000-0000-0000-0000-000000000001' \
   ENTRA_TENANT_ID='00000000-0000-0000-0000-000000000002' \
   ENTRA_CLIENT_SECRET='test-entra-secret' \
-  APERTUS_IMAGE_TAG='test-tag' \
+  APERTUS_IMAGE_TAG_OVERRIDE="${image_tag_override}" \
   bash "${hook}"
 }
 
@@ -99,6 +101,10 @@ if run_hook 'Failed' "${failed_log}"; then
 fi
 if grep -q 'containerapp update' "${failed_log}"; then
   echo 'Inference or frontend image was updated after failed conversion.' >&2
+  exit 1
+fi
+if ! grep -q 'acr update.*allow-exports false.*public-network-enabled false.*default-action Deny' "${failed_log}"; then
+  echo 'Failed postprovision did not restore the private ACR posture.' >&2
   exit 1
 fi
 
@@ -156,6 +162,14 @@ if grep -q 'acr build' "${conversion_resume_log}" || grep -q 'artifact-streaming
 fi
 if ! grep -q 'containerapp update' "${conversion_resume_log}"; then
   echo 'Conversion resume path did not continue through promotion.' >&2
+  exit 1
+fi
+
+automatic_tag_log="${temp_dir}/automatic-tag.log"
+run_hook 'Succeeded' "${automatic_tag_log}" 'false' 'false' 'false' '1' ''
+inference_source_tag="$(git -C "${workspace_root}" rev-parse --short=12 HEAD:src/inference)"
+if ! grep -q "apertus/inference:1.5.0-test-env-${inference_source_tag}" "${automatic_tag_log}"; then
+  echo 'Automatic inference tag is not scoped to the azd environment and inference tree.' >&2
   exit 1
 fi
 
