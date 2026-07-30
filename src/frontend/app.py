@@ -172,6 +172,17 @@ async def model_health(
     return {"status": "ready"}
 
 
+# Chainlit registers its SPA catch-all before loading this module.
+_health_paths = {"/healthz", "/healthz/ready", "/healthz/model"}
+_health_routes = [
+    route for route in app.router.routes if getattr(route, "path", None) in _health_paths
+]
+app.router.routes[:] = [
+    *_health_routes,
+    *[route for route in app.router.routes if route not in _health_routes],
+]
+
+
 @cl.set_chat_profiles
 async def chat_profiles(user=None):
     return [
