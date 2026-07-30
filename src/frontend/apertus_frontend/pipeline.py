@@ -24,15 +24,25 @@ _WEB_GROUNDING_PATTERN = re.compile(
     r"\b(?:"
     r"current|currently|latest|today|tonight|now|recent|recently|live|"
     r"real[- ]?time|up[- ]?to[- ]?date|as of|"
-    r"stock|share price|market price|weather|forecast|news|score|standings|"
-    r"schedule|release date|launch date|planned launch|"
-    r"president|prime minister|bundesrat|federal council|"
-    r"search|look up|lookup|browse|web|online|source|citation|verify|fact[- ]?check"
+    r"search|look up|lookup|browse|web|internet|online|source|citation|verify|"
+    r"double[- ]?check|cross[- ]?check|fact[- ]?check"
     r")\b",
+    re.IGNORECASE,
+)
+_TEMPORAL_WEB_PATTERN = re.compile(
+    r"\b(?:when|what(?:'s| is)?\s+(?:the\s+)?(?:date|time))\b"
+    r".{0,160}\b(?:next|upcoming|planned|scheduled)\b|"
+    r"\b(?:next|upcoming|planned|scheduled)\b.{0,160}\b(?:when|date|time)\b",
     re.IGNORECASE,
 )
 _FOLLOW_UP_PATTERN = re.compile(
     r"^(?:and|also|what about|how about|then|their|theirs|it|that|those)\b",
+    re.IGNORECASE,
+)
+_LOCAL_TASK_PATTERN = re.compile(
+    r"^(?:hi|hello|hey|who are you|what are you|"
+    r"write|draft|rewrite|translate|summarize|explain|brainstorm|calculate|"
+    r"solve|proofread|format|compose|create)\b",
     re.IGNORECASE,
 )
 
@@ -42,8 +52,47 @@ class ChatProfile(StrEnum):
     THINKING = "Thinking"
 
 
+class ProgressStage(StrEnum):
+    CHECKING_INPUT = "checking-input"
+    SELECTING_TOOLS = "selecting-tools"
+    SEARCHING_WEB = "searching-web"
+    GENERATING = "generating"
+    CHECKING_OUTPUT = "checking-output"
+
+
 class SafetyBlockedError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: str = "content",
+        rule: str = "Safety policy",
+        severity: int | None = None,
+        threshold: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.rule = rule
+        self.severity = severity
+        self.threshold = threshold
+
+    @property
+    def user_message(self) -> str:
+        subjects = {
+            "user-input": "Your message",
+            "image": "The uploaded image",
+            "grounding": "Retrieved web content",
+            "model-output": "The generated answer",
+        }
+        subject = subjects.get(self.stage, "The content")
+        if self.severity is not None and self.threshold is not None:
+            details = (
+                f"Rule: {self.rule}; severity {self.severity} met the configured "
+                f"block threshold {self.threshold}."
+            )
+        else:
+            details = f"Rule: {self.rule}."
+        return f"{subject} was blocked by Azure AI Content Safety. {details}"
 
 
 class GroundingUnavailableError(RuntimeError):
@@ -79,6 +128,12 @@ class GroundingPacket:
     @property
     def valid_citations(self) -> tuple[Citation, ...]:
         return tuple(citation for citation in self.citations if _is_web_url(citation.url))
+
+
+@dataclass(frozen=True)
+class GroundingDecision:
+    use_web: bool
+    search_query: str = ""
 
 
 @dataclass(frozen=True)
@@ -126,10 +181,13 @@ class SafetyGateway(Protocol):
 
 
 class GroundingGateway(Protocol):
+    async def route(self, query: str) -> GroundingDecision: ...
+
     async def search(self, query: str) -> GroundingPacket: ...
 
 
 ToolSearch = Callable[[str], Awaitable[GroundingPacket]]
+ProgressCallback = Callable[[ProgressStage], Awaitable[None]]
 
 
 class ModelGateway(Protocol):
@@ -158,11 +216,16 @@ class GroundedCompletionService:
         self._model = model
 
     async def complete(
-        self, request: ChatRequest, profile: ChatProfile
+        self,
+        request: ChatRequest,
+        profile: ChatProfile,
+        *,
+        on_progress: ProgressCallback | None = None,
     ) -> CompletionResult:
         started = time.perf_counter()
         self._validate_request(request)
 
+        await _report_progress(on_progress, ProgressStage.CHECKING_INPUT)
         if request.text.strip():
             await self._safety.screen_text(request.text, purpose="user-input")
 
@@ -170,12 +233,39 @@ class GroundedCompletionService:
             if attachment.is_image:
                 await self._safety.screen_image(attachment)
 
-        grounding_required = requires_web_grounding(request)
+        await _report_progress(on_progress, ProgressStage.SELECTING_TOOLS)
         query = grounding_query(request)
+        route_hint = grounding_route_hint(request)
+        route_source = "rule"
+        if route_hint is None:
+            route_source = "semantic"
+            try:
+                decision = await self._grounding.route(query)
+            except Exception:
+                logger.exception(
+                    "grounding_route_failed",
+                    extra={
+                        "custom_dimensions": {
+                            "correlation_id": request.correlation_id
+                        }
+                    },
+                )
+                decision = GroundingDecision(use_web=True, search_query=query)
+                route_source = "safe-fallback"
+        else:
+            decision = GroundingDecision(
+                use_web=route_hint,
+                search_query=query if route_hint else "",
+            )
+
+        grounding_required = decision.use_web
         grounding = GroundingPacket(summary="")
         if grounding_required:
+            await _report_progress(on_progress, ProgressStage.SEARCHING_WEB)
+            query = decision.search_query.strip() or query
             grounding = await self._get_safe_grounding(query)
 
+        await _report_progress(on_progress, ProgressStage.GENERATING)
         completion = await self._model.complete(
             request=request,
             profile=profile,
@@ -183,6 +273,7 @@ class GroundedCompletionService:
             search_web=self._get_safe_grounding,
         )
 
+        await _report_progress(on_progress, ProgressStage.CHECKING_OUTPUT)
         await self._safety.screen_text(completion.answer, purpose="model-output")
         grounding_sources = tuple(
             source
@@ -213,6 +304,7 @@ class GroundedCompletionService:
                     "attachment_count": len(request.attachments),
                     "citation_count": len(citations),
                     "web_grounding_required": grounding_required,
+                    "grounding_route_source": route_source,
                     "groundedness_checked": grounded is not None,
                     "duration_ms": round((time.perf_counter() - started) * 1000),
                 }
@@ -270,20 +362,26 @@ class GroundedCompletionService:
                 )
 
 
-def requires_web_grounding(request: ChatRequest) -> bool:
+def grounding_route_hint(request: ChatRequest) -> bool | None:
     current = request.text.strip()
-    if _WEB_GROUNDING_PATTERN.search(current):
+    if (
+        _WEB_GROUNDING_PATTERN.search(current)
+        or _TEMPORAL_WEB_PATTERN.search(current)
+    ):
         return True
     words = current.split()
     contextual_follow_up = bool(_FOLLOW_UP_PATTERN.search(current)) or (
         len(words) <= 2 and current.endswith("?")
     )
-    if not contextual_follow_up:
+    if contextual_follow_up:
+        context = "\n".join(
+            turn.content for turn in request.history[-MAX_HISTORY_TURNS:]
+        )
+        if _WEB_GROUNDING_PATTERN.search(context):
+            return True
+    if _LOCAL_TASK_PATTERN.search(current) or (not current and request.attachments):
         return False
-    context = "\n".join(
-        turn.content for turn in request.history[-MAX_HISTORY_TURNS:]
-    )
-    return bool(_WEB_GROUNDING_PATTERN.search(context))
+    return None
 
 
 def grounding_query(request: ChatRequest) -> str:
@@ -298,6 +396,21 @@ def grounding_query(request: ChatRequest) -> str:
         "Use the recent conversation only to resolve references in the current "
         f"request.\n{history}\nCurrent user request: {current}"
     )
+
+
+async def _report_progress(
+    callback: ProgressCallback | None, stage: ProgressStage
+) -> None:
+    if callback is None:
+        return
+    try:
+        await callback(stage)
+    except Exception:
+        logger.warning(
+            "progress_callback_failed",
+            extra={"custom_dimensions": {"stage": stage.value}},
+            exc_info=True,
+        )
 
 
 def _media_grounding_query(attachments: tuple[Attachment, ...]) -> str:

@@ -13,12 +13,14 @@ from apertus_frontend.pipeline import (
     Citation,
     GroundedCompletionService,
     GroundingPacket,
+    GroundingDecision,
     GroundingUnavailableError,
     MAX_IMAGE_BYTES,
     ModelCompletion,
+    ProgressStage,
     SafetyBlockedError,
     grounding_query,
-    requires_web_grounding,
+    grounding_route_hint,
 )
 
 
@@ -56,13 +58,25 @@ class FakeSafety:
 @dataclass
 class FakeGrounding:
     packet: GroundingPacket
+    decision: GroundingDecision = GroundingDecision(use_web=False)
     calls: int = 0
     queries: list[str] = field(default_factory=list)
+    route_calls: int = 0
+
+    async def route(self, query: str) -> GroundingDecision:
+        self.route_calls += 1
+        return self.decision
 
     async def search(self, query: str) -> GroundingPacket:
         self.calls += 1
         self.queries.append(query)
         return self.packet
+
+
+class FailingRouteGrounding(FakeGrounding):
+    async def route(self, query: str) -> GroundingDecision:
+        self.route_calls += 1
+        raise RuntimeError("router unavailable")
 
 
 @dataclass
@@ -251,7 +265,7 @@ def test_current_follow_up_uses_recent_conversation_for_grounding():
         ),
     )
 
-    assert requires_web_grounding(request) is True
+    assert grounding_route_hint(request) is True
     query = grounding_query(request)
     assert "current value of MSFT stock" in query
     assert "Current user request: and google?" in query
@@ -266,7 +280,107 @@ def test_unrelated_turn_after_current_question_does_not_inherit_grounding():
         ),
     )
 
-    assert requires_web_grounding(request) is False
+    assert grounding_route_hint(request) is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "are you sure? double check on internet",
+    ],
+)
+def test_explicit_freshness_and_verification_route_to_web(text):
+    assert grounding_route_hint(ChatRequest(text=text)) is True
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_factual_request_uses_semantic_router():
+    grounding = FakeGrounding(
+        safe_packet(),
+        decision=GroundingDecision(
+            use_web=True,
+            search_query="Voyager 1 communications status",
+        ),
+    )
+    service, _, _, model = make_service(grounding=grounding)
+
+    await service.complete(
+        ChatRequest(text="Has Voyager 1 recovered communications?"),
+        ChatProfile.TOOLS,
+    )
+
+    assert grounding.route_calls == 1
+    assert grounding.queries == ["Voyager 1 communications status"]
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_stable_fact_can_skip_web_after_semantic_routing():
+    grounding = FakeGrounding(
+        safe_packet(), decision=GroundingDecision(use_web=False)
+    )
+    service, _, _, model = make_service(grounding=grounding)
+
+    await service.complete(
+        ChatRequest(text="What is the capital of France?"), ChatProfile.TOOLS
+    )
+
+    assert grounding.route_calls == 1
+    assert grounding.calls == 0
+    assert model.calls == 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "When the Artemis III launch is planned?",
+        "when is the next run of the Artemis project?",
+        "What is the date of the next national election?",
+        "The upcoming product release is scheduled for when?",
+    ],
+)
+def test_temporal_freshness_phrasing_routes_directly_to_web(text):
+    assert grounding_route_hint(ChatRequest(text=text)) is True
+
+
+@pytest.mark.parametrize("text", ["What is a president?", "Share some good news."])
+def test_ambiguous_factual_phrasing_uses_semantic_routing(text):
+    assert grounding_route_hint(ChatRequest(text=text)) is None
+
+
+def test_explicit_explanation_is_a_high_confidence_local_task():
+    assert grounding_route_hint(ChatRequest(text="Explain stock markets.")) is False
+
+
+@pytest.mark.asyncio
+async def test_semantic_router_failure_defaults_safely_to_web():
+    grounding = FailingRouteGrounding(safe_packet())
+    service, _, _, model = make_service(grounding=grounding)
+
+    await service.complete(
+        ChatRequest(text="Has Voyager 1 recovered communications?"),
+        ChatProfile.TOOLS,
+    )
+
+    assert grounding.route_calls == 1
+    assert grounding.calls == 1
+    assert grounding.queries == ["Has Voyager 1 recovered communications?"]
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_semantic_search_query_preserves_original_request():
+    grounding = FakeGrounding(
+        safe_packet(), decision=GroundingDecision(use_web=True, search_query="")
+    )
+    service, _, _, _ = make_service(grounding=grounding)
+
+    await service.complete(
+        ChatRequest(text="Has Voyager 1 recovered communications?"),
+        ChatProfile.TOOLS,
+    )
+
+    assert grounding.queries == ["Has Voyager 1 recovered communications?"]
 
 
 @pytest.mark.asyncio
@@ -319,3 +433,26 @@ async def test_oversize_image_never_calls_apertus():
 
     assert grounding.calls == 0
     assert model.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_progress_reports_web_search_and_answer_checks_in_order():
+    service, _, _, _ = make_service()
+    stages: list[ProgressStage] = []
+
+    async def record(stage: ProgressStage) -> None:
+        stages.append(stage)
+
+    await service.complete(
+        ChatRequest(text="What is the latest news?"),
+        ChatProfile.TOOLS,
+        on_progress=record,
+    )
+
+    assert stages == [
+        ProgressStage.CHECKING_INPUT,
+        ProgressStage.SELECTING_TOOLS,
+        ProgressStage.SEARCHING_WEB,
+        ProgressStage.GENERATING,
+        ProgressStage.CHECKING_OUTPUT,
+    ]

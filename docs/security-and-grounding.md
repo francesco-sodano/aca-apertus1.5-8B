@@ -28,12 +28,24 @@ Safety checks include:
 - Groundedness Detection for supported responses, with English as the reliable
   operating language for that preview API.
 
+During processing, the UI reports the active safety, tool-selection, Web Search,
+generation, and output-verification stage. A Content Safety rejection identifies
+the blocked input or output, policy category, severity, and configured threshold.
+Prompts, classifier payloads, and generated blocked content are not displayed or
+logged with that diagnostic metadata.
+
 Grounding uses Foundry Web Search, backed by Grounding with Bing, with low search
 context and bounded `gpt-4.1-nano` output. Recent conversation turns resolve
 follow-ups before retrieval. The model is instructed to answer from the
 delimited evidence and user media. Exact Web Search URLs are returned when
 available. This reduces unsupported claims but cannot prove that a neural model
 never relies on learned weights.
+
+Tool selection is owned by the frontend boundary. Obvious live or local intents
+use deterministic rules; ambiguous factual requests use a structured semantic
+classifier. A classifier failure defaults to Web Search. Apertus never receives
+a search tool and therefore cannot override, duplicate, or contradict the
+application's retrieval decision.
 
 The separate Grounding with Bing Search agent tool is not used. New Bing
 resources are suspended in this subscription, and benchmark calls through the

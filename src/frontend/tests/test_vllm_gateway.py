@@ -43,6 +43,32 @@ class FakeClient:
         self.chat = SimpleNamespace(completions=FakeCompletions())
 
 
+class UnexpectedToolCompletions:
+    async def create(self, **kwargs):
+        async def chunks():
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=None,
+                            tool_calls=[
+                                SimpleNamespace(
+                                    index=0,
+                                    id="call_1",
+                                    function=SimpleNamespace(
+                                        name="search_web",
+                                        arguments='{"query":"latest"}',
+                                    ),
+                                )
+                            ],
+                        )
+                    )
+                ]
+            )
+
+        return chunks()
+
+
 def grounding_packet():
     return GroundingPacket(
         summary="Evidence",
@@ -80,8 +106,7 @@ async def test_profiles_use_same_endpoint_with_different_template_flags():
     tools_call, thinking_call = client.chat.completions.calls
     assert gateway.base_url == "http://internal-apertus/v1"
     assert tools_call["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
-    assert "tools" in tools_call
-    assert tools_call["tool_choice"] == "auto"
+    assert "tools" not in tools_call
     assert thinking_call["extra_body"]["chat_template_kwargs"]["enable_thinking"] is True
     assert "tools" not in thinking_call
 
@@ -147,57 +172,27 @@ def test_builds_recent_conversation_before_current_request():
     assert messages[-1]["content"][0]["text"] == "and google?"
 
 
-class ToolCallingCompletions:
-    def __init__(self):
-        self.calls = 0
-        self.requests = []
+def test_grounded_prompt_makes_completed_retrieval_authoritative():
+    messages = _build_messages(
+        ChatRequest(
+            text="Are you sure? Double-check on the internet.",
+            history=(
+                ChatTurn("assistant", "Artemis III launches in 2025."),
+            ),
+        ),
+        grounding_packet(),
+    )
 
-    async def create(self, **kwargs):
-        self.calls += 1
-        self.requests.append(kwargs)
-
-        async def chunks():
-            if self.calls == 1:
-                yield SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(
-                            delta=SimpleNamespace(
-                                content=None,
-                                reasoning_content="not exposed",
-                                tool_calls=[
-                                    SimpleNamespace(
-                                        index=0,
-                                        id="call_1",
-                                        function=SimpleNamespace(
-                                            name="search_web",
-                                            arguments='{"query":"latest evidence"}',
-                                        ),
-                                    )
-                                ],
-                            )
-                        )
-                    ]
-                )
-            else:
-                yield SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(
-                            delta=SimpleNamespace(
-                                content="Final answer",
-                                reasoning_content="still not exposed",
-                                tool_calls=[],
-                            )
-                        )
-                    ]
-                )
-
-        return chunks()
+    system = messages[0]["content"]
+    assert "already searched the live public web" in system
+    assert "more authoritative" in system
+    assert "cannot" in system
 
 
 @pytest.mark.asyncio
-async def test_tool_evidence_is_returned_for_groundedness_validation():
+async def test_unexpected_apertus_tool_call_is_rejected():
     client = FakeClient()
-    client.chat.completions = ToolCallingCompletions()
+    client.chat.completions = UnexpectedToolCompletions()
     gateway = VllmGateway(
         base_url="http://internal-apertus/v1",
         api_key="secret",
@@ -205,17 +200,10 @@ async def test_tool_evidence_is_returned_for_groundedness_validation():
         client=client,
     )
 
-    result = await gateway.complete(
-        request=ChatRequest(text="Question"),
-        profile=ChatProfile.TOOLS,
-        grounding=grounding_packet(),
-        search_web=search_web,
-    )
-
-    assert result.answer == "Final answer"
-    assert result.grounding_sources == ("Evidence",)
-    assert not hasattr(result, "reasoning")
-    assert client.chat.completions.requests[0]["tool_choice"] == "auto"
-    assert client.chat.completions.requests[1]["tool_choice"] == "auto"
-    tool_message = client.chat.completions.requests[1]["messages"][-1]
-    assert '"index": 2' in tool_message["content"]
+    with pytest.raises(RuntimeError, match="unexpected tool call"):
+        await gateway.complete(
+            request=ChatRequest(text="Question"),
+            profile=ChatProfile.TOOLS,
+            grounding=grounding_packet(),
+            search_web=search_web,
+        )

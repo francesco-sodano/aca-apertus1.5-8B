@@ -28,6 +28,7 @@ from apertus_frontend.pipeline import (
     GroundedCompletionService,
     GroundingUnavailableError,
     MAX_HISTORY_TURNS,
+    ProgressStage,
     SafetyBlockedError,
 )
 from apertus_frontend.settings import Settings
@@ -174,7 +175,7 @@ async def chat_profiles(user=None):
     return [
         cl.ChatProfile(
             name=ChatProfile.TOOLS.value,
-            markdown_description="Grounded answers with additional cited web search when needed.",
+            markdown_description="Fast answers with automatic live web grounding when needed.",
             default=True,
         ),
         cl.ChatProfile(
@@ -247,22 +248,44 @@ async def on_message(message: cl.Message) -> None:
             )
         ).send()
 
+    activity = cl.Message(content="Getting ready...")
+    await activity.send()
+
+    async def report_progress(stage: ProgressStage) -> None:
+        activity.content = _progress_text(stage, profile)
+        await activity.update()
+
     try:
         runtime = get_runtime()
         async with runtime.admission.admit(_requester_key()):
-            result = await runtime.service.complete(request, profile)
+            result = await runtime.service.complete(
+                request,
+                profile,
+                on_progress=report_progress,
+            )
     except (RateLimitExceededError, CapacityExceededError) as exc:
+        await activity.remove()
         await cl.Message(content=str(exc)).send()
         return
     except ValueError as exc:
+        await activity.remove()
         await cl.Message(content=str(exc)).send()
         return
-    except SafetyBlockedError:
+    except SafetyBlockedError as exc:
         logger.info(
             "request_blocked",
-            extra={"custom_dimensions": {"correlation_id": request.correlation_id}},
+            extra={
+                "custom_dimensions": {
+                    "correlation_id": request.correlation_id,
+                    "stage": exc.stage,
+                    "rule": exc.rule,
+                    "severity": exc.severity,
+                    "threshold": exc.threshold,
+                }
+            },
         )
-        await cl.Message(content="This request was blocked by the safety policy.").send()
+        await activity.remove()
+        await cl.ErrorMessage(content=exc.user_message).send()
         return
     except GroundingUnavailableError as exc:
         logger.info(
@@ -274,6 +297,7 @@ async def on_message(message: cl.Message) -> None:
                 }
             },
         )
+        await activity.remove()
         await cl.Message(
             content="I could not produce a sufficiently grounded answer for this request."
         ).send()
@@ -283,13 +307,29 @@ async def on_message(message: cl.Message) -> None:
             "request_failed",
             extra={"custom_dimensions": {"correlation_id": request.correlation_id}},
         )
+        await activity.remove()
         await cl.Message(
             content=f"The request failed. Reference: `{request.correlation_id}`"
         ).send()
         return
 
+    await activity.remove()
     _remember_conversation(request, result)
     await _send_result(result)
+
+
+def _progress_text(stage: ProgressStage, profile: ChatProfile) -> str:
+    if stage is ProgressStage.CHECKING_INPUT:
+        return "Checking safety..."
+    if stage is ProgressStage.SELECTING_TOOLS:
+        return "Deciding whether live sources are needed..."
+    if stage is ProgressStage.SEARCHING_WEB:
+        return "Using Web Search for fresh sources..."
+    if stage is ProgressStage.CHECKING_OUTPUT:
+        return "Checking the answer for safety and grounding..."
+    if profile is ChatProfile.THINKING:
+        return "Apertus is thinking..."
+    return "Apertus is preparing the answer..."
 
 
 def _conversation_history() -> tuple[ChatTurn, ...]:

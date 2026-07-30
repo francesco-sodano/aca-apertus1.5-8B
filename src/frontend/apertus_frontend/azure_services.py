@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Iterable
@@ -10,6 +11,7 @@ import httpx
 from .pipeline import (
     Attachment,
     Citation,
+    GroundingDecision,
     GroundingPacket,
     SafetyBlockedError,
 )
@@ -26,6 +28,23 @@ CONTENT_SAFETY_SCOPE = "https://cognitiveservices.azure.com/.default"
 FOUNDRY_SCOPE = "https://ai.azure.com/.default"
 CONTENT_SAFETY_API_VERSION = "2024-09-01"
 GROUNDEDNESS_API_VERSION = "2024-09-15-preview"
+GROUNDING_ROUTER_INSTRUCTIONS = """Decide whether a reliable answer requires live public web information.
+
+Use web for information that can change after model training, including current,
+latest, upcoming, planned, scheduled, status, price, office holder, release, or
+availability facts. Also use web when the user explicitly asks to search,
+browse, cite, verify, double-check, or use the internet.
+
+Do not use web for identity, greetings, writing, translation, summarization of
+provided content, timeless explanations, math, or stable facts.
+
+Conversation history is context for resolving references, not evidence. Never
+skip web because an earlier assistant answer appears to contain the requested
+changing fact. A follow-up about a real-world next, upcoming, planned, or
+scheduled occurrence requires fresh web information.
+
+When web is required, produce a standalone search query that resolves references
+using the supplied conversation. Otherwise return an empty search query."""
 
 
 class AsyncTokenCredential(Protocol):
@@ -60,16 +79,27 @@ class AzureContentSafetyGateway:
                 CONTENT_SAFETY_API_VERSION,
             )
             if shield.get("userPromptAnalysis", {}).get("attackDetected") is True:
-                raise SafetyBlockedError(f"{purpose}: prompt attack")
+                raise SafetyBlockedError(
+                    f"{purpose}: prompt attack",
+                    stage=purpose,
+                    rule="Prompt attack detection",
+                )
 
         result = await self._post(
             "/contentsafety/text:analyze",
             {"text": text, "outputType": "EightSeverityLevels"},
             CONTENT_SAFETY_API_VERSION,
         )
-        blocked = _blocked_category(result, self._threshold)
+        blocked = _blocked_category_details(result, self._threshold)
         if blocked:
-            raise SafetyBlockedError(f"{purpose}: {blocked}")
+            category, severity = blocked
+            raise SafetyBlockedError(
+                f"{purpose}: {category} severity {severity}",
+                stage=purpose,
+                rule=category,
+                severity=severity,
+                threshold=self._threshold,
+            )
 
     async def screen_image(self, attachment: Attachment) -> None:
         result = await self._post(
@@ -80,9 +110,16 @@ class AzureContentSafetyGateway:
             },
             CONTENT_SAFETY_API_VERSION,
         )
-        blocked = _blocked_category(result, self._threshold)
+        blocked = _blocked_category_details(result, self._threshold)
         if blocked:
-            raise SafetyBlockedError(f"image: {blocked}")
+            category, severity = blocked
+            raise SafetyBlockedError(
+                f"image: {category} severity {severity}",
+                stage="image",
+                rule=category,
+                severity=severity,
+                threshold=self._threshold,
+            )
 
     async def screen_grounding(self, prompt: str, packet: GroundingPacket) -> None:
         result = await self._post(
@@ -92,7 +129,11 @@ class AzureContentSafetyGateway:
         )
         analyses = result.get("documentsAnalysis") or []
         if any(item.get("attackDetected") is True for item in analyses):
-            raise SafetyBlockedError("grounding: indirect prompt attack")
+            raise SafetyBlockedError(
+                "grounding: indirect prompt attack",
+                stage="grounding",
+                rule="Indirect prompt attack detection",
+            )
 
     async def is_grounded(
         self, *, query: str, answer: str, sources: tuple[str, ...]
@@ -161,6 +202,69 @@ class FoundryWebSearchGateway:
         self._owns_client = client is None
         self._retry_policy = retry_policy
         self._circuit_breaker = AsyncCircuitBreaker()
+        self._router_circuit_breaker = AsyncCircuitBreaker()
+
+    async def route(self, query: str) -> GroundingDecision:
+        started = time.perf_counter()
+
+        async def request() -> dict[str, Any]:
+            token = await self._credential.get_token(FOUNDRY_SCOPE)
+            response = await self._client.post(
+                f"{self._project_endpoint}/openai/v1/responses",
+                headers={"Authorization": f"Bearer {token.token}"},
+                json={
+                    "model": self._model,
+                    "instructions": GROUNDING_ROUTER_INSTRUCTIONS,
+                    "input": query,
+                    "max_output_tokens": 150,
+                    "temperature": 0,
+                    "text": {
+                        "format": {
+                            "type": "json_schema",
+                            "name": "grounding_route",
+                            "strict": True,
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "use_web": {"type": "boolean"},
+                                    "search_query": {"type": "string"},
+                                },
+                                "required": ["use_web", "search_query"],
+                                "additionalProperties": False,
+                            },
+                        }
+                    },
+                },
+            )
+            response.raise_for_status()
+            return response.json()
+
+        payload = await self._router_circuit_breaker.call(
+            lambda: retry_async(
+                request,
+                is_retryable=is_retryable_service_error,
+                policy=self._retry_policy,
+            ),
+            is_failure=is_retryable_service_error,
+        )
+        raw_decision, _ = _extract_foundry_result(payload)
+        decision_data = json.loads(raw_decision)
+        use_web = decision_data.get("use_web")
+        search_query = decision_data.get("search_query")
+        if not isinstance(use_web, bool) or not isinstance(search_query, str):
+            raise ValueError("Grounding router returned an invalid decision.")
+        if not use_web:
+            search_query = ""
+        logger.info(
+            "grounding_route_completed",
+            extra={
+                "custom_dimensions": {
+                    "use_web": use_web,
+                    "duration_ms": round((time.perf_counter() - started) * 1000),
+                }
+            },
+        )
+        return GroundingDecision(use_web=use_web, search_query=search_query.strip())
 
     async def search(self, query: str) -> GroundingPacket:
         started = time.perf_counter()
@@ -229,10 +333,20 @@ class FoundryWebSearchGateway:
 
 
 def _blocked_category(payload: dict[str, Any], threshold: int) -> str | None:
+    blocked = _blocked_category_details(payload, threshold)
+    if blocked is None:
+        return None
+    category, severity = blocked
+    return f"{category} severity {severity}"
+
+
+def _blocked_category_details(
+    payload: dict[str, Any], threshold: int
+) -> tuple[str, int] | None:
     for item in payload.get("categoriesAnalysis") or []:
         severity = int(item.get("severity") or 0)
         if severity >= threshold:
-            return f"{item.get('category', 'Unknown')} severity {severity}"
+            return str(item.get("category") or "Unknown"), severity
     return None
 
 

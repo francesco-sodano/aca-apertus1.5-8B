@@ -69,11 +69,11 @@ flowchart LR
 		Inference --> Monitor
 ```
 
-The `Tools` and `Thinking` profiles use the same vLLM endpoint. `Tools` allows
-additional searches when the initial evidence is insufficient. `Thinking`
-enables the Apertus reasoning parser and does not expose model-initiated tools.
-Stable explanations and writing requests skip web search; current facts use
-recent conversation context and one Bing-backed grounding pass.
+The `Tools` and `Thinking` profiles use the same vLLM endpoint. The application,
+not Apertus, decides whether Web Search is required using high-confidence rules
+and a semantic fallback classifier. `Thinking` enables the Apertus reasoning
+parser. Stable explanations and writing requests skip Web Search; changing facts
+use recent conversation context and exactly one Bing-backed grounding pass.
 
 ## What is Apertus?
 

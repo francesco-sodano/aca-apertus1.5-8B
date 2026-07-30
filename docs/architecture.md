@@ -42,13 +42,15 @@ Tasks while managed-identity image pulls use Private Link.
 1. The frontend validates the message and attachments.
 2. Content Safety checks text, images, and prompt attacks. Raw audio bypasses
    content moderation by explicit design.
-3. Requests involving changing information or explicit web verification call
-   Foundry Web Search once with `gpt-4.1-nano` and recent conversation context.
+3. High-confidence rules route obvious requests. Ambiguous factual requests use
+   a structured `gpt-4.1-nano` semantic decision. Classification failure safely
+   defaults to Web Search.
 4. Prompt Shields checks retrieved evidence for indirect injection. Source URLs
    are included when available but are not required to continue.
 5. Apertus receives the evidence, recent turns, media, and profile settings on the one vLLM
    endpoint.
-6. Tools-mode can repeat the safe grounding path only when evidence is insufficient.
+6. Apertus receives no search tool. Fresh evidence overrides stale model memory
+   and conflicting factual claims in conversation history.
 7. Generated text passes Content Safety and, when grounded, Groundedness Detection
    before browser output.
 
