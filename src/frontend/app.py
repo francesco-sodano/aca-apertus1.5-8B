@@ -23,9 +23,11 @@ from apertus_frontend.pipeline import (
     Attachment,
     ChatProfile,
     ChatRequest,
+    ChatTurn,
     CompletionResult,
     GroundedCompletionService,
     GroundingUnavailableError,
+    MAX_HISTORY_TURNS,
     SafetyBlockedError,
 )
 from apertus_frontend.settings import Settings
@@ -228,6 +230,7 @@ async def on_message(message: cl.Message) -> None:
     request = ChatRequest(
         text=message.content or "",
         attachments=tuple(_read_attachment(element) for element in message.elements or []),
+        history=_conversation_history(),
     )
     profile_name = cl.user_session.get("chat_profile") or ChatProfile.TOOLS.value
     profile = (
@@ -261,10 +264,15 @@ async def on_message(message: cl.Message) -> None:
         )
         await cl.Message(content="This request was blocked by the safety policy.").send()
         return
-    except GroundingUnavailableError:
+    except GroundingUnavailableError as exc:
         logger.info(
             "grounding_rejected",
-            extra={"custom_dimensions": {"correlation_id": request.correlation_id}},
+            extra={
+                "custom_dimensions": {
+                    "correlation_id": request.correlation_id,
+                    "reason": str(exc),
+                }
+            },
         )
         await cl.Message(
             content="I could not produce a sufficiently grounded answer for this request."
@@ -280,7 +288,35 @@ async def on_message(message: cl.Message) -> None:
         ).send()
         return
 
+    _remember_conversation(request, result)
     await _send_result(result)
+
+
+def _conversation_history() -> tuple[ChatTurn, ...]:
+    stored = cl.user_session.get("conversation_history") or []
+    return tuple(
+        ChatTurn(role=str(item["role"]), content=str(item["content"]))
+        for item in stored[-MAX_HISTORY_TURNS:]
+        if isinstance(item, dict) and "role" in item and "content" in item
+    )
+
+
+def _remember_conversation(
+    request: ChatRequest, result: CompletionResult
+) -> None:
+    user_content = request.text.strip()
+    if not user_content and request.attachments:
+        kinds = ", ".join(item.mime_type for item in request.attachments)
+        user_content = f"[User supplied attachments: {kinds}]"
+    turns = (
+        *request.history,
+        ChatTurn(role="user", content=user_content),
+        ChatTurn(role="assistant", content=result.answer),
+    )[-MAX_HISTORY_TURNS:]
+    cl.user_session.set(
+        "conversation_history",
+        [{"role": turn.role, "content": turn.content} for turn in turns],
+    )
 
 
 def _requester_key() -> str:

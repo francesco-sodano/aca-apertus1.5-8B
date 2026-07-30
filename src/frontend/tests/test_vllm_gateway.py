@@ -8,6 +8,7 @@ from apertus_frontend.pipeline import (
     Attachment,
     ChatProfile,
     ChatRequest,
+    ChatTurn,
     Citation,
     GroundingPacket,
 )
@@ -80,7 +81,7 @@ async def test_profiles_use_same_endpoint_with_different_template_flags():
     assert gateway.base_url == "http://internal-apertus/v1"
     assert tools_call["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
     assert "tools" in tools_call
-    assert tools_call["tool_choice"] == "required"
+    assert tools_call["tool_choice"] == "auto"
     assert thinking_call["extra_body"]["chat_template_kwargs"]["enable_thinking"] is True
     assert "tools" not in thinking_call
 
@@ -100,6 +101,27 @@ def test_builds_current_vllm_image_and_audio_parts():
     assert [part["type"] for part in parts] == ["text", "image_url", "audio_url"]
     assert parts[1]["image_url"]["url"].startswith("data:image/png;base64,")
     assert parts[2]["audio_url"]["url"].startswith("data:audio/wav;base64,")
+
+
+def test_builds_recent_conversation_before_current_request():
+    request = ChatRequest(
+        text="and google?",
+        history=(
+            ChatTurn("user", "What is the current MSFT stock value?"),
+            ChatTurn("assistant", "MSFT is trading at $450."),
+        ),
+    )
+
+    messages = _build_messages(request, grounding_packet())
+
+    assert [message["role"] for message in messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert messages[1]["content"] == "What is the current MSFT stock value?"
+    assert messages[-1]["content"][0]["text"] == "and google?"
 
 
 class ToolCallingCompletions:
@@ -170,7 +192,7 @@ async def test_tool_evidence_is_returned_for_groundedness_validation():
     assert result.answer == "Final answer"
     assert result.grounding_sources == ("Evidence",)
     assert not hasattr(result, "reasoning")
-    assert client.chat.completions.requests[0]["tool_choice"] == "required"
+    assert client.chat.completions.requests[0]["tool_choice"] == "auto"
     assert client.chat.completions.requests[1]["tool_choice"] == "auto"
     tool_message = client.chat.completions.requests[1]["messages"][-1]
     assert '"index": 2' in tool_message["content"]

@@ -13,7 +13,7 @@ The Bicep deployment creates one Sweden Central resource group containing:
 | Storage account and Azure Files | Persistent Hugging Face and vLLM caches |
 | Key Vault | Hugging Face token, vLLM API key, and operator health token |
 | Managed identities | Frontend system identity for SDK calls; separate user identities for ACR and Key Vault |
-| Foundry account and project | Forced Web Search and `gpt-5-mini` grounding deployment |
+| Foundry account and project | Adaptive Bing-backed Web Search and `gpt-5-mini` grounding deployment |
 | Content Safety account | Text, image, Prompt Shields, and groundedness checks |
 | Log Analytics and Application Insights | Platform logs, application telemetry, and dependencies |
 | VNet and dedicated subnets | ACA infrastructure and isolated private endpoints |
@@ -42,14 +42,15 @@ Tasks while managed-identity image pulls use Private Link.
 1. The frontend validates the message and attachments.
 2. Content Safety checks text, images, and prompt attacks. Raw audio bypasses
    content moderation by explicit design.
-3. Foundry Web Search is called with `tool_choice: required`.
-4. The evidence packet must contain content and valid HTTP(S) citations, unless
-   user media is itself a grounding source.
-5. Prompt Shields checks retrieved evidence for indirect injection.
-6. Apertus receives the evidence, media, and profile settings on the one vLLM
+3. Requests involving changing information or explicit web verification call
+   Foundry Web Search once with low reasoning and recent conversation context.
+4. Prompt Shields checks retrieved evidence for indirect injection. Source URLs
+   are included when available but are not required to continue.
+5. Apertus receives the evidence, recent turns, media, and profile settings on the one vLLM
    endpoint.
-7. Tools-mode model searches repeat the safe grounding path.
-8. Generated text passes Content Safety and groundedness before browser output.
+6. Tools-mode can repeat the safe grounding path only when evidence is insufficient.
+7. Generated text passes Content Safety and, when grounded, Groundedness Detection
+   before browser output.
 
 ## Scale and Startup
 

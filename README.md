@@ -9,10 +9,11 @@
 
 Deploy `swiss-ai/Apertus-v1.5-8B` on an Azure Container Apps serverless A100
 with a separate Entra-authenticated Chainlit frontend. The frontend requires
-Azure AI Content Safety approval and cited Microsoft Foundry Web Search evidence
-before every model call. The vLLM app has internal-only ingress. The environment
-runs in a custom VNet and reaches model storage, Key Vault, Foundry, Content
-Safety, and ACR image pulls through private endpoints.
+Azure AI Content Safety approval before every model call and uses Microsoft
+Foundry Web Search for changing or explicitly web-grounded facts. The vLLM app
+has internal-only ingress. The environment runs in a custom VNet and reaches
+model storage, Key Vault, Foundry, Content Safety, and ACR image pulls through
+private endpoints.
 
 > This repository is deployed in the `cloudcherry-prod` subscription under
 > `rg-cloudcherry-apertus`. Running another `azd up` updates billable Azure
@@ -69,8 +70,10 @@ flowchart LR
 ```
 
 The `Tools` and `Thinking` profiles use the same vLLM endpoint. `Tools` allows
-additional cited searches. `Thinking` enables the Apertus reasoning parser and
-does not expose model-initiated tools. Both always run mandatory pre-grounding.
+additional searches when the initial evidence is insufficient. `Thinking`
+enables the Apertus reasoning parser and does not expose model-initiated tools.
+Stable explanations and writing requests skip web search; current facts use
+recent conversation context and one Bing-backed grounding pass.
 
 ## What is Apertus?
 
@@ -238,11 +241,12 @@ Safety, Foundry, and an OpenAI-compatible Apertus server. See
 
 ## Safety Boundary
 
-Text and images are screened before inference. Web evidence is required, cited,
-and screened for indirect prompt injection. Generated text is screened and, for
-English, checked for groundedness before it is shown. Any dependency failure,
-unsafe result, empty evidence, invalid citations, or ungrounded result stops the
-request.
+Text and images are screened before inference. Changing facts require web
+evidence, which is screened for indirect prompt injection. Source links are
+best-effort rather than a response gate. Generated text is screened and, when
+web evidence was used, checked for groundedness before it is shown. Any required
+dependency failure, unsafe result, empty evidence, or ungrounded result stops
+the request.
 
 Raw audio is the explicit exception: MIME type and size are validated, but its
 spoken content is sent to Apertus without Content Safety moderation. Do not

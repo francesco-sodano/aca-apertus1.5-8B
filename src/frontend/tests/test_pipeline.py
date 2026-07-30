@@ -9,6 +9,7 @@ from apertus_frontend.pipeline import (
     Attachment,
     ChatProfile,
     ChatRequest,
+    ChatTurn,
     Citation,
     GroundedCompletionService,
     GroundingPacket,
@@ -16,6 +17,8 @@ from apertus_frontend.pipeline import (
     MAX_IMAGE_BYTES,
     ModelCompletion,
     SafetyBlockedError,
+    grounding_query,
+    requires_web_grounding,
 )
 
 
@@ -54,9 +57,11 @@ class FakeSafety:
 class FakeGrounding:
     packet: GroundingPacket
     calls: int = 0
+    queries: list[str] = field(default_factory=list)
 
     async def search(self, query: str) -> GroundingPacket:
         self.calls += 1
+        self.queries.append(query)
         return self.packet
 
 
@@ -109,15 +114,19 @@ async def test_unsafe_input_never_calls_apertus():
 
 
 @pytest.mark.asyncio
-async def test_citation_free_text_never_calls_apertus():
-    service, _, _, model = make_service(
+async def test_citation_free_evidence_can_still_ground_an_answer():
+    service, safety, grounding, model = make_service(
         grounding=FakeGrounding(GroundingPacket(summary="No cited evidence"))
     )
 
-    with pytest.raises(GroundingUnavailableError):
-        await service.complete(ChatRequest(text="What happened?"), ChatProfile.TOOLS)
+    result = await service.complete(
+        ChatRequest(text="What is the latest news?"), ChatProfile.TOOLS
+    )
 
-    assert model.calls == 0
+    assert result.citations == ()
+    assert model.calls == 1
+    assert grounding.calls == 1
+    assert safety.groundedness_sources == ("No cited evidence",)
 
 
 @pytest.mark.asyncio
@@ -134,7 +143,7 @@ async def test_indirect_attack_in_grounding_never_calls_apertus():
 
 @pytest.mark.asyncio
 async def test_raw_audio_uses_documented_safety_exception():
-    service, safety, _, model = make_service()
+    service, safety, grounding, model = make_service()
     audio = Attachment(
         name="question.wav",
         mime_type="audio/wav",
@@ -149,6 +158,7 @@ async def test_raw_audio_uses_documented_safety_exception():
     assert safety.image_calls == 0
     assert "user-input" not in safety.text_purposes
     assert model.requests[0].attachments == (audio,)
+    assert grounding.calls == 0
 
 
 @pytest.mark.asyncio
@@ -173,7 +183,9 @@ async def test_ungrounded_output_is_not_returned():
     service, _, _, model = make_service(safety=FakeSafety(grounded=False))
 
     with pytest.raises(GroundingUnavailableError):
-        await service.complete(ChatRequest(text="Question"), ChatProfile.TOOLS)
+        await service.complete(
+            ChatRequest(text="What is the current score?"), ChatProfile.TOOLS
+        )
 
     assert model.calls == 1
 
@@ -183,7 +195,9 @@ async def test_indeterminate_groundedness_is_not_returned():
     service, _, _, model = make_service(safety=FakeSafety(grounded=None))
 
     with pytest.raises(GroundingUnavailableError):
-        await service.complete(ChatRequest(text="Question"), ChatProfile.TOOLS)
+        await service.complete(
+            ChatRequest(text="What is the current score?"), ChatProfile.TOOLS
+        )
 
     assert model.calls == 1
 
@@ -203,12 +217,56 @@ async def test_tool_grounding_sources_are_included_in_output_validation():
     model.complete = complete_with_tool_evidence
     service, _, _, _ = make_service(safety=safety, model=model)
 
-    await service.complete(ChatRequest(text="Question"), ChatProfile.TOOLS)
+    await service.complete(
+        ChatRequest(text="What is the current score?"), ChatProfile.TOOLS
+    )
 
     assert safety.groundedness_sources == (
         "Verified evidence",
         "Additional tool evidence",
     )
+
+
+@pytest.mark.asyncio
+async def test_stable_explanation_skips_web_search_and_groundedness():
+    service, safety, grounding, model = make_service(safety=FakeSafety(grounded=False))
+
+    result = await service.complete(
+        ChatRequest(text="Explain gravity for a high school class."),
+        ChatProfile.TOOLS,
+    )
+
+    assert result.answer == "Grounded answer"
+    assert grounding.calls == 0
+    assert safety.groundedness_sources == ()
+    assert model.calls == 1
+
+
+def test_current_follow_up_uses_recent_conversation_for_grounding():
+    request = ChatRequest(
+        text="and google?",
+        history=(
+            ChatTurn("user", "What is the current value of MSFT stock?"),
+            ChatTurn("assistant", "MSFT is trading at $450."),
+        ),
+    )
+
+    assert requires_web_grounding(request) is True
+    query = grounding_query(request)
+    assert "current value of MSFT stock" in query
+    assert "Current user request: and google?" in query
+
+
+def test_unrelated_turn_after_current_question_does_not_inherit_grounding():
+    request = ChatRequest(
+        text="Write a short poem about summer.",
+        history=(
+            ChatTurn("user", "What is the current value of MSFT stock?"),
+            ChatTurn("assistant", "MSFT is trading at $450."),
+        ),
+    )
+
+    assert requires_web_grounding(request) is False
 
 
 @pytest.mark.asyncio

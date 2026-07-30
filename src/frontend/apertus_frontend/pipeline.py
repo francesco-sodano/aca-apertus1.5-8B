@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
+import re
+import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Awaitable, Callable, Protocol
@@ -16,6 +18,23 @@ MAX_IMAGES = 4
 MAX_AUDIO_FILES = 1
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_AUDIO_BYTES = 20 * 1024 * 1024
+MAX_HISTORY_TURNS = 6
+
+_WEB_GROUNDING_PATTERN = re.compile(
+    r"\b(?:"
+    r"current|currently|latest|today|tonight|now|recent|recently|live|"
+    r"real[- ]?time|up[- ]?to[- ]?date|as of|"
+    r"stock|share price|market price|weather|forecast|news|score|standings|"
+    r"schedule|release date|launch date|planned launch|"
+    r"president|prime minister|bundesrat|federal council|"
+    r"search|look up|lookup|browse|web|online|source|citation|verify|fact[- ]?check"
+    r")\b",
+    re.IGNORECASE,
+)
+_FOLLOW_UP_PATTERN = re.compile(
+    r"^(?:and|also|what about|how about|then|their|theirs|it|that|those)\b",
+    re.IGNORECASE,
+)
 
 
 class ChatProfile(StrEnum):
@@ -63,9 +82,20 @@ class GroundingPacket:
 
 
 @dataclass(frozen=True)
+class ChatTurn:
+    role: str
+    content: str
+
+    def __post_init__(self) -> None:
+        if self.role not in {"user", "assistant"}:
+            raise ValueError("Chat history roles must be user or assistant.")
+
+
+@dataclass(frozen=True)
 class ChatRequest:
     text: str
     attachments: tuple[Attachment, ...] = ()
+    history: tuple[ChatTurn, ...] = ()
     correlation_id: str = field(default_factory=lambda: str(uuid4()))
 
 
@@ -130,6 +160,7 @@ class GroundedCompletionService:
     async def complete(
         self, request: ChatRequest, profile: ChatProfile
     ) -> CompletionResult:
+        started = time.perf_counter()
         self._validate_request(request)
 
         if request.text.strip():
@@ -139,13 +170,11 @@ class GroundedCompletionService:
             if attachment.is_image:
                 await self._safety.screen_image(attachment)
 
-        query = request.text.strip() or _media_grounding_query(request.attachments)
-        grounding = await self._get_safe_grounding(query)
-
-        if not grounding.valid_citations and not request.attachments:
-            raise GroundingUnavailableError(
-                "Web Search returned no usable citations; Apertus was not called."
-            )
+        grounding_required = requires_web_grounding(request)
+        query = grounding_query(request)
+        grounding = GroundingPacket(summary="")
+        if grounding_required:
+            grounding = await self._get_safe_grounding(query)
 
         completion = await self._model.complete(
             request=request,
@@ -155,15 +184,22 @@ class GroundedCompletionService:
         )
 
         await self._safety.screen_text(completion.answer, purpose="model-output")
-        grounded = await self._safety.is_grounded(
-            query=query,
-            answer=completion.answer,
-            sources=(grounding.summary, *completion.grounding_sources),
+        grounding_sources = tuple(
+            source
+            for source in (grounding.summary, *completion.grounding_sources)
+            if source.strip()
         )
-        if grounded is not True:
-            raise GroundingUnavailableError(
-                "The generated answer did not receive an explicit groundedness approval."
+        grounded: bool | None = None
+        if grounding_sources:
+            grounded = await self._safety.is_grounded(
+                query=query,
+                answer=completion.answer,
+                sources=grounding_sources,
             )
+            if grounded is not True:
+                raise GroundingUnavailableError(
+                    "The generated answer did not receive an explicit groundedness approval."
+                )
 
         citations = _unique_citations(
             (*grounding.valid_citations, *completion.citations)
@@ -176,7 +212,9 @@ class GroundedCompletionService:
                     "profile": profile.value,
                     "attachment_count": len(request.attachments),
                     "citation_count": len(citations),
+                    "web_grounding_required": grounding_required,
                     "groundedness_checked": grounded is not None,
+                    "duration_ms": round((time.perf_counter() - started) * 1000),
                 }
             },
         )
@@ -230,6 +268,36 @@ class GroundedCompletionService:
                     f"Attachment exceeds the {byte_limit}-byte limit: "
                     f"{attachment.name}"
                 )
+
+
+def requires_web_grounding(request: ChatRequest) -> bool:
+    current = request.text.strip()
+    if _WEB_GROUNDING_PATTERN.search(current):
+        return True
+    words = current.split()
+    contextual_follow_up = bool(_FOLLOW_UP_PATTERN.search(current)) or (
+        len(words) <= 2 and current.endswith("?")
+    )
+    if not contextual_follow_up:
+        return False
+    context = "\n".join(
+        turn.content for turn in request.history[-MAX_HISTORY_TURNS:]
+    )
+    return bool(_WEB_GROUNDING_PATTERN.search(context))
+
+
+def grounding_query(request: ChatRequest) -> str:
+    current = request.text.strip() or _media_grounding_query(request.attachments)
+    if not request.history:
+        return current
+    history = "\n".join(
+        f"{turn.role.title()}: {turn.content[:2000]}"
+        for turn in request.history[-MAX_HISTORY_TURNS:]
+    )
+    return (
+        "Use the recent conversation only to resolve references in the current "
+        f"request.\n{history}\nCurrent user request: {current}"
+    )
 
 
 def _media_grounding_query(attachments: tuple[Attachment, ...]) -> str:

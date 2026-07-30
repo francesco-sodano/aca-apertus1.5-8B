@@ -12,10 +12,12 @@
 
 ## Fail-Closed Policy
 
-There is no application path to vLLM until required input checks and grounding
-succeed. Requests are refused when Content Safety, Foundry, citation validation,
-Prompt Shields, vLLM, output safety, or groundedness fails. The frontend does not
-fall back to an ungrounded model call.
+There is no application path to vLLM until required input checks succeed.
+Requests involving changing information also require Foundry evidence and Prompt
+Shields approval. Such requests are refused when Foundry, vLLM, output safety,
+or groundedness fails. Stable explanations, transformations, and writing tasks
+do not pay the web-search latency. Citations are best-effort display metadata,
+not a response gate.
 
 Safety checks include:
 
@@ -26,10 +28,12 @@ Safety checks include:
 - Groundedness Detection for supported responses, with English as the reliable
   operating language for that preview API.
 
-Grounding requires Foundry Web Search, backed by Grounding with Bing. The model
-is instructed to answer only from the delimited evidence and user media, and
-exact Web Search URLs are returned as citations. This reduces unsupported claims
-but cannot prove that a neural model never relies on learned weights.
+Grounding uses Foundry Web Search, backed by Grounding with Bing, with low search
+context, low GPT-5 reasoning effort, low verbosity, and bounded output. Recent
+conversation turns resolve follow-ups before retrieval. The model is instructed
+to answer from the delimited evidence and user media. Exact Web Search URLs are
+returned when available. This reduces unsupported claims but cannot prove that a
+neural model never relies on learned weights.
 
 ## Audio Exception
 

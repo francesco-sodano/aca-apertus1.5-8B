@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterable
 from typing import Any, Protocol
 
@@ -162,6 +163,8 @@ class FoundryWebSearchGateway:
         self._circuit_breaker = AsyncCircuitBreaker()
 
     async def search(self, query: str) -> GroundingPacket:
+        started = time.perf_counter()
+
         async def request() -> dict[str, Any]:
             token = await self._credential.get_token(FOUNDRY_SCOPE)
             response = await self._client.post(
@@ -169,12 +172,20 @@ class FoundryWebSearchGateway:
                 headers={"Authorization": f"Bearer {token.token}"},
                 json={
                     "model": self._model,
+                    "instructions": (
+                        "Search the web and return only concise factual evidence "
+                        "useful for another model. Keep the response under 400 words."
+                    ),
                     "input": query,
+                    "reasoning": {"effort": "low"},
+                    "text": {"verbosity": "low"},
+                    "max_output_tokens": 600,
+                    "include": ["web_search_call.action.sources"],
                     "tool_choice": "required",
                     "tools": [
                         {
                             "type": "web_search",
-                            "search_context_size": "medium",
+                            "search_context_size": "low",
                             "user_location": {
                                 "type": "approximate",
                                 "country": "SE",
@@ -199,7 +210,13 @@ class FoundryWebSearchGateway:
         summary, citations = _extract_foundry_result(payload)
         logger.info(
             "web_search_completed",
-            extra={"custom_dimensions": {"citation_count": len(citations)}},
+            extra={
+                "custom_dimensions": {
+                    "citation_count": len(citations),
+                    "duration_ms": round((time.perf_counter() - started) * 1000),
+                    "summary_characters": len(summary),
+                }
+            },
         )
         return GroundingPacket(summary=summary, citations=citations)
 
@@ -220,7 +237,8 @@ def _extract_foundry_result(
     payload: dict[str, Any],
 ) -> tuple[str, tuple[Citation, ...]]:
     texts: list[str] = []
-    citations: list[Citation] = []
+    inline_citations: list[Citation] = []
+    included_sources: list[Citation] = []
 
     direct_text = payload.get("output_text")
     if isinstance(direct_text, str) and direct_text.strip():
@@ -232,15 +250,24 @@ def _extract_foundry_result(
             if text and text not in texts:
                 texts.append(text)
         if item.get("type") == "url_citation" and isinstance(item.get("url"), str):
-            citations.append(
+            inline_citations.append(
+                Citation(
+                    title=str(item.get("title") or item["url"]),
+                    url=item["url"],
+                )
+            )
+        if item.get("type") == "url" and isinstance(item.get("url"), str):
+            included_sources.append(
                 Citation(
                     title=str(item.get("title") or item["url"]),
                     url=item["url"],
                 )
             )
 
-    unique: dict[str, Citation] = {citation.url: citation for citation in citations}
-    return "\n\n".join(texts), tuple(unique.values())
+    unique: dict[str, Citation] = {}
+    for citation in (*inline_citations, *included_sources):
+        unique.setdefault(citation.url, citation)
+    return "\n\n".join(texts), tuple(unique.values())[:5]
 
 
 def _walk_dicts(value: Any) -> Iterable[dict[str, Any]]:
