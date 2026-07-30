@@ -117,11 +117,27 @@ Microsoft Foundry owns the grounding project, Web Search integration, and
 the private GPU Container App.
 
 Stable explanations and writing requests skip Web Search. Current, changing,
-or explicitly verified facts use one application-brokered grounding pass. The
-broker validates and safety-screens retrieved evidence before Apertus receives
-it. If the preview groundedness detector is inconclusive, the application
-retries once and can return the cited, safety-screened Web Search summary rather
-than discard a successful search.
+or explicitly verified facts can use one application-brokered grounding pass.
+In the `Tools` profile, Apertus receives a registry-generated native selector
+schema and chooses one registered tool or no tool. Obvious local tasks bypass
+selection, while explicit current/future requests cannot choose `none`. The
+broker validates the selected name and JSON arguments, enforces call and timeout
+limits, executes the handler, and safety-screens its output before Apertus
+receives it. If the preview groundedness detector is
+inconclusive, the application retries once and can return the cited,
+safety-screened Web Search summary rather than discard a successful search.
+
+The built-in registry demonstrates three distinct native Apertus choices:
+
+| Tool | Selected for |
+| --- | --- |
+| `search_web` | Current, changing, planned, upcoming, or explicitly verified public information |
+| `calculator` | Deterministic arithmetic expressions |
+| `get_current_time` | Current date or time in an IANA timezone |
+
+New read-only tools are added with a name, user-facing label, precise
+description, JSON Schema, timeout, call limit, and asynchronous handler. The
+orchestration pipeline does not need tool-specific branches.
 
 ## Azure Services
 
@@ -155,7 +171,7 @@ and applies least privilege, defense in depth, and private connectivity.
 | Key Vault protection | Key Vault uses RBAC, purge protection, private access, versionless secret references, and no application secrets in images or committed parameters. |
 | Hardened registry | ACR admin, anonymous access, exports, and public networking are disabled at rest. Deployment opens a short authenticated build window and closes it before verification. Runtime pulls use managed identity over Private Link. |
 | Safety boundary | Input, image, evidence, and output checks run before content reaches the browser. Prompt Shield protects retrieved evidence from indirect prompt injection. Unsafe content remains a hard block. |
-| Grounding boundary | The application brokers the current Web Search integration. Fresh evidence overrides model memory, citations are preserved, and uncited fallback evidence is rejected. The broker boundary can register additional validated tools. |
+| Tool and grounding boundary | Apertus selects among allowlisted schemas. The broker validates arguments, limits execution, safety-screens outputs, preserves citations, and rejects unknown tools or uncited fallback evidence. |
 | Secret handling | Sensitive bootstrap values enter as secure ARM parameters, are stored in Key Vault, and are cleared from the local azd environment after initialization. |
 | Observability privacy | Structured telemetry records stage, duration, result, category, and correlation identifiers, but not raw prompts, attachments, evidence, answers, tokens, or secrets. |
 

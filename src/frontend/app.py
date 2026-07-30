@@ -253,8 +253,10 @@ async def on_message(message: cl.Message) -> None:
     activity = cl.Message(content="Getting ready...")
     await activity.send()
 
-    async def report_progress(stage: ProgressStage) -> None:
-        activity.content = _progress_text(stage, profile)
+    async def report_progress(
+        stage: ProgressStage, detail: str | None = None
+    ) -> None:
+        activity.content = _progress_text(stage, profile, detail)
         await activity.update()
 
     try:
@@ -320,13 +322,17 @@ async def on_message(message: cl.Message) -> None:
     await _send_result(result)
 
 
-def _progress_text(stage: ProgressStage, profile: ChatProfile) -> str:
+def _progress_text(
+    stage: ProgressStage,
+    profile: ChatProfile,
+    detail: str | None = None,
+) -> str:
     if stage is ProgressStage.CHECKING_INPUT:
         return "Checking safety..."
     if stage is ProgressStage.SELECTING_TOOLS:
         return "Deciding whether live sources are needed..."
-    if stage is ProgressStage.SEARCHING_WEB:
-        return "Using Web Search for fresh sources..."
+    if stage is ProgressStage.USING_TOOL:
+        return f"Apertus selected {detail or 'a tool'}..."
     if stage is ProgressStage.REFINING:
         return "Tightening the answer to the sources..."
     if stage is ProgressStage.USING_SEARCH_SUMMARY:

@@ -12,7 +12,17 @@ from apertus_frontend.pipeline import (
     Citation,
     GroundingPacket,
 )
-from apertus_frontend.vllm_gateway import VllmGateway, _build_messages
+from apertus_frontend.vllm_gateway import (
+    VllmGateway,
+    _build_messages,
+    _parse_selector_call,
+)
+from apertus_frontend.tools import (
+    ToolResult,
+    ToolValidationError,
+    calculator_spec,
+    current_time_spec,
+)
 
 
 class FakeCompletions:
@@ -45,22 +55,103 @@ class FakeClient:
 
 class UnexpectedToolCompletions:
     async def create(self, **kwargs):
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="",
+                        tool_calls=[
+                            SimpleNamespace(
+                                id="call_1",
+                                function=SimpleNamespace(
+                                    name="select_tool",
+                                    arguments='{"tool":"unknown"}',
+                                ),
+                            )
+                        ],
+                    )
+                )
+            ]
+        )
+
+
+class ToolThenAnswerCompletions:
+    def __init__(self):
+        self.calls = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+
+        if len(self.calls) == 1:
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="Choosing calculator.",
+                            tool_calls=[
+                                SimpleNamespace(
+                                    id="call_1",
+                                    function=SimpleNamespace(
+                                        name="select_tool",
+                                        arguments=(
+                                            "Choosing calculator."
+                                            '<|tools_prefix|>[{"calculator":'
+                                            '{"expression":"2 + 2"}}]'
+                                        ),
+                                    ),
+                                )
+                            ],
+                        )
+                    )
+                ]
+            )
+
         async def chunks():
             yield SimpleNamespace(
                 choices=[
                     SimpleNamespace(
                         delta=SimpleNamespace(
-                            content=None,
+                            content="The result is 4.",
+                            tool_calls=[],
+                        )
+                    )
+                ]
+            )
+
+        return chunks()
+
+
+class NoneThenAnswerCompletions(ToolThenAnswerCompletions):
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+
+        if len(self.calls) == 1:
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="",
                             tool_calls=[
                                 SimpleNamespace(
-                                    index=0,
-                                    id="call_1",
+                                    id="call_none",
                                     function=SimpleNamespace(
-                                        name="search_web",
-                                        arguments='{"query":"latest"}',
+                                        name="select_tool",
+                                        arguments="none",
                                     ),
                                 )
                             ],
+                        )
+                    )
+                ]
+            )
+
+        async def chunks():
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content="I am Apertus v1.5 8B.",
+                            tool_calls=[],
                         )
                     )
                 ]
@@ -80,6 +171,14 @@ async def search_web(query):
     return grounding_packet()
 
 
+TOOLS = (calculator_spec(), current_time_spec())
+
+
+async def execute_calculator(call):
+    assert call.name == "calculator"
+    return ToolResult(content='{"expression":"2 + 2","result":4}')
+
+
 @pytest.mark.asyncio
 async def test_profiles_use_same_endpoint_with_different_template_flags():
     client = FakeClient()
@@ -94,13 +193,17 @@ async def test_profiles_use_same_endpoint_with_different_template_flags():
         request=ChatRequest(text="Question one"),
         profile=ChatProfile.TOOLS,
         grounding=grounding_packet(),
-        search_web=search_web,
+        tools=(),
+        execute_tool=execute_calculator,
+        require_tool=False,
     )
     await gateway.complete(
         request=ChatRequest(text="Question two"),
         profile=ChatProfile.THINKING,
         grounding=grounding_packet(),
-        search_web=search_web,
+        tools=(),
+        execute_tool=execute_calculator,
+        require_tool=False,
     )
 
     tools_call, thinking_call = client.chat.completions.calls
@@ -112,8 +215,9 @@ async def test_profiles_use_same_endpoint_with_different_template_flags():
 
 
 @pytest.mark.asyncio
-async def test_stable_identity_prompt_has_no_tools_and_identifies_apertus():
+async def test_stable_identity_prompt_can_answer_without_selecting_a_tool():
     client = FakeClient()
+    client.chat.completions = NoneThenAnswerCompletions()
     gateway = VllmGateway(
         base_url="http://internal-apertus/v1",
         api_key="secret",
@@ -125,11 +229,15 @@ async def test_stable_identity_prompt_has_no_tools_and_identifies_apertus():
         request=ChatRequest(text="Who are you?"),
         profile=ChatProfile.TOOLS,
         grounding=GroundingPacket(summary=""),
-        search_web=search_web,
+        tools=TOOLS,
+        execute_tool=execute_calculator,
+        require_tool=False,
     )
 
     request = client.chat.completions.calls[0]
-    assert "tools" not in request
+    selector, answer = client.chat.completions.calls
+    assert selector["tool_choice"]["function"]["name"] == "select_tool"
+    assert "tools" not in answer
     assert "Apertus v1.5 8B" in request["messages"][0]["content"]
     assert "not ChatGPT" in request["messages"][0]["content"]
 
@@ -190,7 +298,7 @@ def test_grounded_prompt_makes_completed_retrieval_authoritative():
 
 
 @pytest.mark.asyncio
-async def test_unexpected_apertus_tool_call_is_rejected():
+async def test_unknown_apertus_tool_call_is_rejected_by_broker():
     client = FakeClient()
     client.chat.completions = UnexpectedToolCompletions()
     gateway = VllmGateway(
@@ -200,10 +308,71 @@ async def test_unexpected_apertus_tool_call_is_rejected():
         client=client,
     )
 
-    with pytest.raises(RuntimeError, match="unexpected tool call"):
+    async def reject_unknown(call):
+        raise ToolValidationError(f"Apertus selected unknown tool: {call.name}")
+
+    with pytest.raises(ToolValidationError, match="unknown tool"):
         await gateway.complete(
             request=ChatRequest(text="Question"),
             profile=ChatProfile.TOOLS,
             grounding=grounding_packet(),
-            search_web=search_web,
+            tools=TOOLS,
+            execute_tool=reject_unknown,
+            require_tool=False,
         )
+
+
+@pytest.mark.asyncio
+async def test_native_tool_call_executes_once_then_tools_are_bounded():
+    client = FakeClient()
+    client.chat.completions = ToolThenAnswerCompletions()
+    gateway = VllmGateway(
+        base_url="http://internal-apertus/v1",
+        api_key="secret",
+        model="swiss-ai/Apertus-v1.5-8B",
+        client=client,
+    )
+
+    result = await gateway.complete(
+        request=ChatRequest(text="What is 2 + 2?"),
+        profile=ChatProfile.TOOLS,
+        grounding=GroundingPacket(summary=""),
+        tools=TOOLS,
+        execute_tool=execute_calculator,
+        require_tool=True,
+    )
+
+    first, second = client.chat.completions.calls
+    assert first["tool_choice"]["function"]["name"] == "select_tool"
+    assert len(first["tools"]) == 1
+    assert "tools" not in second
+    assert second["messages"][-1]["role"] == "tool"
+    assert result.answer == "The result is 4."
+    assert result.selected_tools == ("calculator",)
+
+
+def test_apertus_wrapper_normalizes_real_tool_name_and_arguments():
+    call = _parse_selector_call(
+        {
+            "id": "call_1",
+            "name": "select_tool",
+            "arguments": (
+                "I will calculate it.<|tools_prefix|>"
+                '[{"calculator":{"expression":"37*19+4"}}]'
+            ),
+        },
+        TOOLS,
+        require_tool=True,
+    )
+
+    assert call is not None
+    assert call.name == "calculator"
+    assert call.arguments_json == '{"expression": "37*19+4"}'
+
+
+def test_selector_none_is_allowed_only_when_tool_is_optional():
+    raw = {"id": "call_none", "name": "select_tool", "arguments": "none"}
+
+    assert _parse_selector_call(raw, TOOLS, require_tool=False) is None
+    with pytest.raises(ToolValidationError, match="required"):
+        _parse_selector_call(raw, TOOLS, require_tool=True)

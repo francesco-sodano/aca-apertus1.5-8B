@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from dataclasses import dataclass, field
 
 import pytest
@@ -13,7 +14,6 @@ from apertus_frontend.pipeline import (
     Citation,
     GroundedCompletionService,
     GroundingPacket,
-    GroundingDecision,
     GroundingUnavailableError,
     MAX_IMAGE_BYTES,
     ModelCompletion,
@@ -22,6 +22,7 @@ from apertus_frontend.pipeline import (
     grounding_query,
     grounding_route_hint,
 )
+from apertus_frontend.tools import ToolCall
 
 
 @dataclass
@@ -61,14 +62,8 @@ class FakeSafety:
 @dataclass
 class FakeGrounding:
     packet: GroundingPacket
-    decision: GroundingDecision = GroundingDecision(use_web=False)
     calls: int = 0
     queries: list[str] = field(default_factory=list)
-    route_calls: int = 0
-
-    async def route(self, query: str) -> GroundingDecision:
-        self.route_calls += 1
-        return self.decision
 
     async def search(self, query: str) -> GroundingPacket:
         self.calls += 1
@@ -76,23 +71,52 @@ class FakeGrounding:
         return self.packet
 
 
-class FailingRouteGrounding(FakeGrounding):
-    async def route(self, query: str) -> GroundingDecision:
-        self.route_calls += 1
-        raise RuntimeError("router unavailable")
-
-
 @dataclass
 class FakeModel:
     calls: int = 0
     profiles: list[ChatProfile] = field(default_factory=list)
     requests: list[ChatRequest] = field(default_factory=list)
+    selected_tool: str | None = None
+    tool_arguments_json: str = ""
 
-    async def complete(self, *, request, profile, grounding, search_web):
+    async def complete(
+        self,
+        *,
+        request,
+        profile,
+        grounding,
+        tools,
+        execute_tool,
+        require_tool,
+    ):
         self.calls += 1
         self.profiles.append(profile)
         self.requests.append(request)
-        return ModelCompletion(answer="Grounded answer")
+        selected_tool = self.selected_tool or (
+            "search_web" if require_tool else None
+        )
+        if not selected_tool or not tools:
+            return ModelCompletion(answer="Grounded answer")
+        arguments_json = self.tool_arguments_json
+        if not arguments_json:
+            arguments_json = json.dumps(
+                {
+                    "search_web": {"query": request.text},
+                    "calculator": {"expression": "2 + 2"},
+                    "get_current_time": {"timezone": "Europe/Zurich"},
+                }[selected_tool]
+            )
+        result = await execute_tool(
+            ToolCall("call-1", selected_tool, arguments_json)
+        )
+        return ModelCompletion(
+            answer="Grounded answer",
+            citations=tuple(
+                Citation(item.title, item.url) for item in result.citations
+            ),
+            grounding_sources=result.grounding_sources,
+            selected_tools=(selected_tool,),
+        )
 
 
 def safe_packet() -> GroundingPacket:
@@ -155,7 +179,7 @@ async def test_indirect_attack_in_grounding_never_calls_apertus():
     with pytest.raises(SafetyBlockedError):
         await service.complete(ChatRequest(text="Current news"), ChatProfile.TOOLS)
 
-    assert model.calls == 0
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio
@@ -257,7 +281,7 @@ async def test_groundedness_recovery_reports_refinement_and_summary_fallback():
     service, _, _, _ = make_service(safety=FakeSafety(grounded=False))
     stages: list[ProgressStage] = []
 
-    async def record(stage: ProgressStage) -> None:
+    async def record(stage: ProgressStage, detail: str | None) -> None:
         stages.append(stage)
 
     await service.complete(
@@ -294,7 +318,6 @@ async def test_tool_grounding_sources_are_included_in_output_validation():
     )
 
     assert safety.groundedness_sources == (
-        "Verified evidence",
         "Additional tool evidence",
     )
 
@@ -352,42 +375,39 @@ def test_explicit_freshness_and_verification_route_to_web(text):
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_factual_request_uses_semantic_router():
-    grounding = FakeGrounding(
-        safe_packet(),
-        decision=GroundingDecision(
-            use_web=True,
-            search_query="Voyager 1 communications status",
-        ),
+async def test_apertus_selected_web_search_is_brokered_and_cited():
+    grounding = FakeGrounding(safe_packet())
+    model = FakeModel(
+        selected_tool="search_web",
+        tool_arguments_json='{"query":"Voyager 1 communications status"}',
     )
-    service, _, _, model = make_service(grounding=grounding)
+    service, _, _, model = make_service(grounding=grounding, model=model)
 
-    await service.complete(
+    result = await service.complete(
         ChatRequest(text="Has Voyager 1 recovered communications?"),
         ChatProfile.TOOLS,
     )
 
-    assert grounding.route_calls == 1
     assert grounding.queries == [
-        "Search objective: Voyager 1 communications status\n"
-        "User request and response requirements: Has Voyager 1 recovered "
-        "communications?"
+        "Search objective selected by Apertus: Voyager 1 communications status\n"
+        "LATEST USER REQUEST: Has Voyager 1 recovered communications?\n"
+        "Conversation context for reference resolution only: Has Voyager 1 "
+        "recovered communications?"
     ]
+    assert result.selected_tools == ("search_web",)
+    assert result.citations == safe_packet().citations
     assert model.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_stable_fact_can_skip_web_after_semantic_routing():
-    grounding = FakeGrounding(
-        safe_packet(), decision=GroundingDecision(use_web=False)
-    )
+async def test_apertus_can_answer_stable_fact_without_a_tool():
+    grounding = FakeGrounding(safe_packet())
     service, _, _, model = make_service(grounding=grounding)
 
     await service.complete(
         ChatRequest(text="What is the capital of France?"), ChatProfile.TOOLS
     )
 
-    assert grounding.route_calls == 1
     assert grounding.calls == 0
     assert model.calls == 1
 
@@ -399,6 +419,7 @@ async def test_ambiguous_stable_fact_can_skip_web_after_semantic_routing():
         "when is the next run of the Artemis project?",
         "What is the date of the next national election?",
         "The upcoming product release is scheduled for when?",
+        "Give me the plot of The Odyssey (2026 film) in Romansh.",
     ],
 )
 def test_temporal_freshness_phrasing_routes_directly_to_web(text):
@@ -406,7 +427,7 @@ def test_temporal_freshness_phrasing_routes_directly_to_web(text):
 
 
 @pytest.mark.parametrize("text", ["What is a president?", "Share some good news."])
-def test_ambiguous_factual_phrasing_uses_semantic_routing(text):
+def test_ambiguous_factual_phrasing_leaves_tool_choice_to_apertus(text):
     assert grounding_route_hint(ChatRequest(text=text)) is None
 
 
@@ -414,47 +435,24 @@ def test_explicit_explanation_is_a_high_confidence_local_task():
     assert grounding_route_hint(ChatRequest(text="Explain stock markets.")) is False
 
 
-@pytest.mark.asyncio
-async def test_semantic_router_failure_defaults_safely_to_web():
-    grounding = FailingRouteGrounding(safe_packet())
-    service, _, _, model = make_service(grounding=grounding)
+def test_calculation_remains_eligible_for_apertus_tool_selection():
+    assert grounding_route_hint(ChatRequest(text="Calculate 18 percent of 745.")) is None
 
-    await service.complete(
-        ChatRequest(text="Has Voyager 1 recovered communications?"),
-        ChatProfile.TOOLS,
-    )
 
-    assert grounding.route_calls == 1
-    assert grounding.calls == 1
-    assert grounding.queries == ["Has Voyager 1 recovered communications?"]
-    assert model.calls == 1
+def test_stable_capital_question_is_a_high_confidence_local_task():
+    assert grounding_route_hint(ChatRequest(text="What is the capital of France?")) is False
 
 
 @pytest.mark.asyncio
-async def test_empty_semantic_search_query_preserves_original_request():
-    grounding = FakeGrounding(
-        safe_packet(), decision=GroundingDecision(use_web=True, search_query="")
-    )
-    service, _, _, _ = make_service(grounding=grounding)
-
-    await service.complete(
-        ChatRequest(text="Has Voyager 1 recovered communications?"),
-        ChatProfile.TOOLS,
-    )
-
-    assert grounding.queries == ["Has Voyager 1 recovered communications?"]
-
-
-@pytest.mark.asyncio
-async def test_semantic_search_preserves_user_response_requirements():
-    grounding = FakeGrounding(
-        safe_packet(),
-        decision=GroundingDecision(
-            use_web=True,
-            search_query="The Odyssey 2026 Christopher Nolan plot",
+async def test_apertus_search_query_can_preserve_response_requirements():
+    grounding = FakeGrounding(safe_packet())
+    model = FakeModel(
+        selected_tool="search_web",
+        tool_arguments_json=(
+            '{"query":"The Odyssey 2026 Christopher Nolan plot in Romansh"}'
         ),
     )
-    service, _, _, _ = make_service(grounding=grounding)
+    service, _, _, _ = make_service(grounding=grounding, model=model)
 
     await service.complete(
         ChatRequest(
@@ -467,8 +465,10 @@ async def test_semantic_search_preserves_user_response_requirements():
     )
 
     assert grounding.queries == [
-        "Search objective: The Odyssey 2026 Christopher Nolan plot\n"
-        "User request and response requirements: give me the plot of The Odyssey "
+        "Search objective selected by Apertus: The Odyssey 2026 Christopher "
+        "Nolan plot in Romansh\nLATEST USER REQUEST: give me the plot of The "
+        "Odyssey (2026 film by Christopher Nolan) in Romansh\nConversation "
+        "context for reference resolution only: give me the plot of The Odyssey "
         "(2026 film by Christopher Nolan) in Romansh"
     ]
 
@@ -530,7 +530,7 @@ async def test_progress_reports_web_search_and_answer_checks_in_order():
     service, _, _, _ = make_service()
     stages: list[ProgressStage] = []
 
-    async def record(stage: ProgressStage) -> None:
+    async def record(stage: ProgressStage, detail: str | None) -> None:
         stages.append(stage)
 
     await service.complete(
@@ -542,7 +542,7 @@ async def test_progress_reports_web_search_and_answer_checks_in_order():
     assert stages == [
         ProgressStage.CHECKING_INPUT,
         ProgressStage.SELECTING_TOOLS,
-        ProgressStage.SEARCHING_WEB,
         ProgressStage.GENERATING,
+        ProgressStage.USING_TOOL,
         ProgressStage.CHECKING_OUTPUT,
     ]

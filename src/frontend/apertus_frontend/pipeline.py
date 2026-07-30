@@ -1,4 +1,4 @@
-"""Safety-gated chat orchestration with deterministic and semantic web routing."""
+"""Safety-gated chat orchestration with native Apertus tool selection."""
 
 from __future__ import annotations
 
@@ -8,10 +8,23 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Awaitable, Callable, Protocol
 from urllib.parse import urlparse
 from uuid import uuid4
+
+from .tools import (
+    ToolCall,
+    ToolCitation,
+    ToolExecutor,
+    ToolRegistry,
+    ToolResult,
+    ToolSpec,
+    calculator_spec,
+    current_time_spec,
+    search_web_spec,
+)
 
 logger = logging.getLogger("apertus.frontend.pipeline")
 
@@ -43,10 +56,12 @@ _FOLLOW_UP_PATTERN = re.compile(
 )
 _LOCAL_TASK_PATTERN = re.compile(
     r"^(?:hi|hello|hey|who are you|what are you|"
-    r"write|draft|rewrite|translate|summarize|explain|brainstorm|calculate|"
-    r"solve|proofread|format|compose|create)\b",
+    r"write|draft|rewrite|translate|summarize|explain|brainstorm|"
+    r"proofread|format|compose|create)\b|"
+    r"^(?:what is|what's)\s+the\s+capital\s+of\b",
     re.IGNORECASE,
 )
+_YEAR_PATTERN = re.compile(r"\b(20\d{2})\b")
 
 
 class ChatProfile(StrEnum):
@@ -57,7 +72,7 @@ class ChatProfile(StrEnum):
 class ProgressStage(StrEnum):
     CHECKING_INPUT = "checking-input"
     SELECTING_TOOLS = "selecting-tools"
-    SEARCHING_WEB = "searching-web"
+    USING_TOOL = "using-tool"
     GENERATING = "generating"
     REFINING = "refining"
     USING_SEARCH_SUMMARY = "using-search-summary"
@@ -86,6 +101,7 @@ class SafetyBlockedError(RuntimeError):
             "user-input": "Your message",
             "image": "The uploaded image",
             "grounding": "Retrieved web content",
+            "tool-output": "The selected tool output",
             "model-output": "The generated answer",
         }
         subject = subjects.get(self.stage, "The content")
@@ -135,12 +151,6 @@ class GroundingPacket:
 
 
 @dataclass(frozen=True)
-class GroundingDecision:
-    use_web: bool
-    search_query: str = ""
-
-
-@dataclass(frozen=True)
 class ChatTurn:
     role: str
     content: str
@@ -163,6 +173,7 @@ class ModelCompletion:
     answer: str
     citations: tuple[Citation, ...] = ()
     grounding_sources: tuple[str, ...] = ()
+    selected_tools: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -170,6 +181,7 @@ class CompletionResult:
     answer: str
     citations: tuple[Citation, ...]
     correlation_id: str
+    selected_tools: tuple[str, ...] = ()
 
 
 class SafetyGateway(Protocol):
@@ -185,13 +197,10 @@ class SafetyGateway(Protocol):
 
 
 class GroundingGateway(Protocol):
-    async def route(self, query: str) -> GroundingDecision: ...
-
     async def search(self, query: str) -> GroundingPacket: ...
 
 
-ToolSearch = Callable[[str], Awaitable[GroundingPacket]]
-ProgressCallback = Callable[[ProgressStage], Awaitable[None]]
+ProgressCallback = Callable[[ProgressStage, str | None], Awaitable[None]]
 
 
 class ModelGateway(Protocol):
@@ -201,7 +210,9 @@ class ModelGateway(Protocol):
         request: ChatRequest,
         profile: ChatProfile,
         grounding: GroundingPacket,
-        search_web: ToolSearch,
+        tools: tuple[ToolSpec, ...],
+        execute_tool: ToolExecutor,
+        require_tool: bool,
     ) -> ModelCompletion: ...
 
 
@@ -214,10 +225,12 @@ class GroundedCompletionService:
         safety: SafetyGateway,
         grounding: GroundingGateway,
         model: ModelGateway,
+        additional_tools: tuple[ToolSpec, ...] = (),
     ) -> None:
         self._safety = safety
         self._grounding = grounding
         self._model = model
+        self._additional_tools = additional_tools
 
     async def complete(
         self,
@@ -240,54 +253,87 @@ class GroundedCompletionService:
         await _report_progress(on_progress, ProgressStage.SELECTING_TOOLS)
         query = grounding_query(request)
         route_hint = grounding_route_hint(request)
-        route_source = "rule"
-        if route_hint is None:
-            route_source = "semantic"
+
+        async def search_web(arguments: dict[str, object]) -> ToolResult:
+            objective = str(arguments["query"]).strip()
+            search_query = (
+                f"Search objective selected by Apertus: {objective}\n"
+                f"LATEST USER REQUEST: {request.text.strip()[:1000]}\n"
+                f"Conversation context for reference resolution only: {query[:2000]}"
+            )
+            return await self._search_web({"query": search_query})
+
+        tool_registry = ToolRegistry(
+            (
+                search_web_spec(search_web),
+                calculator_spec(),
+                current_time_spec(),
+                *self._additional_tools,
+            )
+        )
+
+        async def execute_tool(call: ToolCall) -> ToolResult:
             try:
-                decision = await self._grounding.route(query)
-            except Exception:
-                logger.exception(
-                    "grounding_route_failed",
+                spec = tool_registry.get(call.name)
+                await _report_progress(
+                    on_progress, ProgressStage.USING_TOOL, spec.display_name
+                )
+                logger.info(
+                    "tool_selected",
                     extra={
                         "custom_dimensions": {
-                            "correlation_id": request.correlation_id
+                            "correlation_id": request.correlation_id,
+                            "tool": call.name,
                         }
                     },
                 )
-                decision = GroundingDecision(use_web=True, search_query=query)
-                route_source = "safe-fallback"
-        else:
-            decision = GroundingDecision(
-                use_web=route_hint,
-                search_query=query if route_hint else "",
-            )
-
-        grounding_required = decision.use_web
-        grounding = GroundingPacket(summary="")
-        if grounding_required:
-            await _report_progress(on_progress, ProgressStage.SEARCHING_WEB)
-            search_query = decision.search_query.strip()
-            if search_query and search_query != query:
-                search_query = (
-                    f"Search objective: {search_query}\n"
-                    f"User request and response requirements: {query}"
+                result = await tool_registry.execute(call)
+                await self._safety.screen_text(result.content, purpose="tool-output")
+            except Exception:
+                logger.exception(
+                    "tool_rejected",
+                    extra={
+                        "custom_dimensions": {
+                            "correlation_id": request.correlation_id,
+                            "tool": call.name,
+                        }
+                    },
                 )
-            else:
-                search_query = query
-            grounding = await self._get_safe_grounding(search_query)
+                raise
+            logger.info(
+                "tool_completed",
+                extra={
+                    "custom_dimensions": {
+                        "correlation_id": request.correlation_id,
+                        "tool": call.name,
+                        "citation_count": len(result.citations),
+                    }
+                },
+            )
+            return result
 
+        grounding = GroundingPacket(summary="")
         await _report_progress(on_progress, ProgressStage.GENERATING)
         completion = await self._model.complete(
             request=request,
             profile=profile,
             grounding=grounding,
-            search_web=self._get_safe_grounding,
+            tools=(
+                tool_registry.specs
+                if profile is ChatProfile.TOOLS and route_hint is not False
+                else ()
+            ),
+            execute_tool=execute_tool,
+            require_tool=route_hint is True,
         )
 
         await _report_progress(on_progress, ProgressStage.CHECKING_OUTPUT)
-        citations = _unique_citations(
-            (*grounding.valid_citations, *completion.citations)
+        citations = _unique_citations(completion.citations)
+        grounding = GroundingPacket(
+            summary="\n\n".join(completion.grounding_sources),
+            citations=citations,
         )
+        selected_tools = completion.selected_tools
         grounded, grounding_sources = await self._validate_completion(
             query=query,
             completion=completion,
@@ -303,7 +349,9 @@ class GroundedCompletionService:
                 request=request,
                 profile=profile,
                 grounding=grounding,
-                search_web=self._get_safe_grounding,
+                tools=(),
+                execute_tool=execute_tool,
+                require_tool=False,
             )
             await _report_progress(on_progress, ProgressStage.CHECKING_OUTPUT)
             retry_grounded, _ = await self._validate_completion(
@@ -346,8 +394,7 @@ class GroundedCompletionService:
                     "profile": profile.value,
                     "attachment_count": len(request.attachments),
                     "citation_count": len(citations),
-                    "web_grounding_required": grounding_required,
-                    "grounding_route_source": route_source,
+                    "selected_tools": ",".join(selected_tools),
                     "groundedness_checked": grounded is not None,
                     "groundedness_fallback_used": groundedness_fallback_used,
                     "duration_ms": round((time.perf_counter() - started) * 1000),
@@ -358,6 +405,19 @@ class GroundedCompletionService:
             answer=completion.answer,
             citations=citations,
             correlation_id=request.correlation_id,
+            selected_tools=selected_tools,
+        )
+
+    async def _search_web(self, arguments: dict[str, object]) -> ToolResult:
+        query = str(arguments["query"]).strip()
+        packet = await self._get_safe_grounding(query)
+        return ToolResult(
+            content=packet.summary,
+            citations=tuple(
+                ToolCitation(citation.title, citation.url)
+                for citation in packet.valid_citations
+            ),
+            grounding_sources=(packet.summary,),
         )
 
     async def _validate_completion(
@@ -369,9 +429,11 @@ class GroundedCompletionService:
     ) -> tuple[bool | None, tuple[str, ...]]:
         await self._safety.screen_text(completion.answer, purpose="model-output")
         grounding_sources = tuple(
-            source
-            for source in (grounding.summary, *completion.grounding_sources)
-            if source.strip()
+            dict.fromkeys(
+                source
+                for source in (grounding.summary, *completion.grounding_sources)
+                if source.strip()
+            )
         )
         if not grounding_sources:
             return None, ()
@@ -429,12 +491,15 @@ class GroundedCompletionService:
 
 
 def grounding_route_hint(request: ChatRequest) -> bool | None:
-    """Return an obvious route or defer ambiguous factual intent to Foundry."""
+    """Identify requests that require some tool while Apertus chooses its name."""
     current = request.text.strip()
     if (
         _WEB_GROUNDING_PATTERN.search(current)
         or _TEMPORAL_WEB_PATTERN.search(current)
     ):
+        return True
+    current_year = datetime.now(UTC).year
+    if any(int(year) >= current_year for year in _YEAR_PATTERN.findall(current)):
         return True
     words = current.split()
     contextual_follow_up = bool(_FOLLOW_UP_PATTERN.search(current)) or (
@@ -467,12 +532,14 @@ def grounding_query(request: ChatRequest) -> str:
 
 
 async def _report_progress(
-    callback: ProgressCallback | None, stage: ProgressStage
+    callback: ProgressCallback | None,
+    stage: ProgressStage,
+    detail: str | None = None,
 ) -> None:
     if callback is None:
         return
     try:
-        await callback(stage)
+        await callback(stage, detail)
     except Exception:
         logger.warning(
             "progress_callback_failed",

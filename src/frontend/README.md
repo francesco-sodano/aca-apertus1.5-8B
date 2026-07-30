@@ -24,8 +24,9 @@ uv run chainlit run app.py --host 127.0.0.1 --port 8000
 
 `DefaultAzureCredential` supplies Content Safety and Foundry tokens. For local
 development, `az login` is usually sufficient. Content Safety remains mandatory.
-Foundry grounding is adaptive and fail-closed for changing facts; stable
-explanations and writing tasks bypass Web Search.
+In the Tools profile, Apertus natively selects Web Search, Calculator, Current
+Time, or no tool. The frontend validates and safety-screens every selected tool
+before returning its result to Apertus.
 
 Raw audio is intentionally not moderated by Azure AI Content Safety. Disable
 audio uploads if the target policy requires spoken-content moderation.

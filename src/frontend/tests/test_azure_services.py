@@ -10,7 +10,6 @@ from apertus_frontend.azure_services import (
 )
 from apertus_frontend.pipeline import (
     Citation,
-    GroundingDecision,
     SafetyBlockedError,
 )
 
@@ -201,41 +200,3 @@ async def test_web_search_uses_model_compatible_latency_controls(
     assert "shown directly" in client.body["instructions"]
     assert "requested language" in client.body["instructions"]
     assert client.body["tools"][0]["search_context_size"] == "low"
-
-
-@pytest.mark.asyncio
-async def test_semantic_router_returns_structured_context_resolved_decision():
-    client = RecordingClient(
-        payload={
-            "output": [
-                {
-                    "type": "message",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": (
-                                '{"use_web":true,"search_query":'
-                                '"Artemis III current launch date"}'
-                            ),
-                        }
-                    ],
-                }
-            ]
-        }
-    )
-    gateway = FoundryWebSearchGateway(
-        project_endpoint="https://foundry.example/api/projects/test",
-        model="gpt-4.1-nano-grounding",
-        credential=FakeCredential(),
-        client=client,
-    )
-
-    decision = await gateway.route("When is Artemis III planned?")
-
-    assert decision == GroundingDecision(
-        use_web=True, search_query="Artemis III current launch date"
-    )
-    assert client.body["temperature"] == 0
-    assert client.body["text"]["format"]["type"] == "json_schema"
-    assert "history is context" in client.body["instructions"]
-    assert "tools" not in client.body
