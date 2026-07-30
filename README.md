@@ -66,7 +66,7 @@ flowchart TB
 
         subgraph FrontendApp[Frontend Container App - Consumption CPU]
             Chainlit[Chainlit web UI<br/>HTTPS and WebSocket]
-            Pipeline[Application pipeline<br/>Content checks, tool routing,<br/>citations and progress]
+          Pipeline[Application pipeline<br/>Content checks, Apertus tool selection,<br/>citations and progress]
         end
 
         subgraph InferenceApp[Inference Container App - Consumption-GPU-NC24-A100]
@@ -79,8 +79,8 @@ flowchart TB
     subgraph Foundry[Microsoft Foundry]
         Project[Foundry project]
         WebSearch[Web Search grounding]
-        Router[gpt-4.1-nano<br/>routing and search synthesis]
-        Project --> WebSearch --> Router
+        SearchModel[gpt-4.1-nano<br/>search synthesis]
+        Project --> WebSearch --> SearchModel
     end
 
     subgraph SecurityData[Private Azure services]
@@ -113,38 +113,65 @@ flowchart TB
 
 Only the frontend and inference workloads run in Azure Container Apps.
 Microsoft Foundry owns the grounding project, Web Search integration, and
-`gpt-4.1-nano` deployment. Apertus remains the answering model and runs inside
-the private GPU Container App.
+`gpt-4.1-nano` deployment. GPT-4.1 nano is used within the Web Search tool to
+retrieve public sources and synthesize a concise cited evidence packet. Apertus
+runs inside the private GPU Container App, selects and uses tools, and writes
+the final answer.
 
-Stable explanations and writing requests skip Web Search. Current, changing,
-or explicitly verified facts can use one application-brokered grounding pass.
-In the `Tools` profile, Apertus receives a registry-generated native selector
-schema and chooses one registered tool or no tool. Obvious local tasks bypass
-selection, while explicit current/future requests cannot choose `none`. The
-broker validates the selected name and JSON arguments, enforces call and timeout
-limits, executes the handler, and safety-screens its output before Apertus
-receives it. If the preview groundedness detector is
-inconclusive, the application retries once and can return the cited,
-safety-screened Web Search summary rather than discard a successful search.
+## Apertus 1.5 Native Tools
 
-The built-in registry demonstrates three distinct native Apertus choices:
+This deployment exercises Apertus 1.5's native function-calling capability in
+the `Tools` chat profile. Apertus chooses the registered tool and produces its
+arguments. The application remains the execution boundary: it never gives the
+model arbitrary code, shell, network, or unregistered function access.
 
-| Tool | Selected for |
-| --- | --- |
-| `search_web` | Current, changing, planned, upcoming, or explicitly verified public information |
-| `calculator` | Deterministic arithmetic expressions |
-| `get_current_time` | Current date or time in an IANA timezone |
+The request flow is:
+
+1. High-confidence local tasks such as writing, translation, identity, and
+   stable facts bypass tool selection for lower latency.
+2. For other requests, Apertus receives one registry-generated native
+   `select_tool` function whose enum contains the available tool names and,
+   when safe, `none`.
+3. A deterministic, non-streaming selector round chooses at most one tool and
+   emits JSON arguments. Final answer generation remains streamed.
+4. The broker rejects unknown names and invalid JSON Schema arguments, applies
+   the tool timeout and one-call request limit, executes the allowlisted
+   handler, and safety-screens its output.
+5. Apertus receives the tool result through standard assistant tool-call and
+   `role="tool"` messages, then writes the final answer. Web results retain
+   citations and pass Prompt Shield and groundedness checks.
+
+The built-in registry contains three tools:
+
+| Tool | Apertus selects it for | Input | Key controls |
+| --- | --- | --- | --- |
+| `search_web` | Current, changing, planned, upcoming, priced, status, news, or explicitly verified public information | Standalone query, maximum 500 characters | Foundry Web Search, latest-user context, Prompt Shield, Content Safety, citations, 120-second timeout |
+| `calculator` | Deterministic arithmetic | Numeric expression, maximum 200 characters | AST-only operators, bounded complexity/exponents/results, no `eval`, 2-second timeout |
+| `get_current_time` | Current clock time or calendar date in a requested timezone | IANA timezone such as `Europe/Zurich` | IANA validation, no external network call, 2-second timeout |
+
+Explicit current or future requests cannot choose `none`. A malformed native
+selector payload gets one bounded correction attempt; subsequent invalid,
+unknown, or extra calls fail closed. The UI displays `Apertus selected <Tool>`
+and telemetry records selection, completion, rejection, and citation counts
+without prompt or tool-result bodies.
 
 New read-only tools are added with a name, user-facing label, precise
 description, JSON Schema, timeout, call limit, and asynchronous handler. The
-orchestration pipeline does not need tool-specific branches.
+orchestration pipeline does not need tool-specific branches. See the
+[frontend tool registry](src/frontend/apertus_frontend/tools.py) and
+[frontend guide](src/frontend/README.md).
+
+Stable explanations and writing requests skip Web Search. If the preview
+groundedness detector is inconclusive after a search, the application retries
+once and can return the cited, safety-screened Web Search summary rather than
+discard a successful retrieval.
 
 ## Azure Services
 
 | Azure service | Documentation | Why it is included |
 | --- | --- | --- |
 | Azure Container Apps | [Overview](https://learn.microsoft.com/azure/container-apps/overview) and [serverless GPUs](https://learn.microsoft.com/azure/container-apps/gpu-serverless-overview) | Runs the CPU frontend and the isolated A100-backed Apertus inference service with managed scaling and revisions. |
-| Microsoft Foundry | [What is Microsoft Foundry?](https://learn.microsoft.com/azure/ai-foundry/what-is-ai-foundry) and [Web Search](https://learn.microsoft.com/azure/foundry/agents/how-to/tools/web-search) | Classifies ambiguous freshness needs and retrieves current public evidence with source URLs. |
+| Microsoft Foundry | [What is Microsoft Foundry?](https://learn.microsoft.com/azure/ai-foundry/what-is-ai-foundry) and [Web Search](https://learn.microsoft.com/azure/foundry/agents/how-to/tools/web-search) | Hosts GPT-4.1 nano and Web Search to retrieve public sources and synthesize the cited evidence packet used by Apertus. |
 | Azure AI Content Safety | [Overview](https://learn.microsoft.com/azure/ai-services/content-safety/overview) | Screens user text, images, retrieved evidence, and generated output; detects prompt attacks and reports blocked categories. |
 | Azure Container Registry Premium | [Overview](https://learn.microsoft.com/azure/container-registry/container-registry-intro) and [artifact streaming](https://learn.microsoft.com/azure/container-registry/container-registry-artifact-streaming) | Stores private frontend and inference images and accelerates the large inference-image startup path. |
 | Azure Files Premium NFS | [NFS file shares](https://learn.microsoft.com/azure/storage/files/files-nfs-protocol) | Persists model and compilation caches without requiring Storage shared-key authentication in the application. |

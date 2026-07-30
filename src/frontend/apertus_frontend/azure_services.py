@@ -167,7 +167,7 @@ class AzureContentSafetyGateway:
 
 
 class FoundryWebSearchGateway:
-    """Classify freshness intent and retrieve one cited public-web evidence packet."""
+    """Retrieve and synthesize one cited public-web evidence packet."""
     def __init__(
         self,
         *,
