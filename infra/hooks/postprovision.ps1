@@ -24,6 +24,7 @@ if ($LASTEXITCODE -ne 0) { $gitTag = 'local' }
 $imageTag = if ($env:APERTUS_IMAGE_TAG) { $env:APERTUS_IMAGE_TAG } else { "1.5.0-$gitTag" }
 $inferenceRepository = 'apertus/inference'
 
+# Bootstrap secrets are now in Key Vault; remove source copies from local azd state.
 azd env set APPLICATION_SECRETS_READY true | Out-Null
 azd env set HF_TOKEN '' | Out-Null
 azd env set ENTRA_CLIENT_SECRET '' | Out-Null
@@ -34,6 +35,7 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($acrResourceId)) {
     throw 'Could not resolve the ACR resource ID for the RBAC gate.'
 }
 
+# Do not push private images until both runtime identities can pull from ACR.
 foreach ($identity in @(
     @{ Name = 'frontend'; PrincipalId = $env:FRONTEND_IDENTITY_PRINCIPAL_ID },
     @{ Name = 'inference'; PrincipalId = $env:INFERENCE_IDENTITY_PRINCIPAL_ID }
@@ -52,6 +54,7 @@ foreach ($identity in @(
     Write-Host "AcrPull confirmed for the $($identity.Name) identity."
 }
 
+# ACR Tasks is Microsoft hosted, so the private registry opens only for the build.
 Write-Host 'Opening the authenticated ACR build window.'
 az acr update --name $env:AZURE_CONTAINER_REGISTRY_NAME `
     --allow-exports true --public-network-enabled true --default-action Allow --output none
@@ -94,6 +97,7 @@ else {
     if (-not $buildSucceeded) { throw 'Inference image build failed.' }
 }
 
+# The GPU app is promoted only after the exact immutable tag is streamable.
 $streamingStatus = az acr artifact-streaming operation show `
     --name $env:AZURE_CONTAINER_REGISTRY_NAME `
     --image "${inferenceRepository}:${imageTag}" `
@@ -127,6 +131,7 @@ if ($streamingStatus -ne 'Succeeded') {
     throw 'Artifact-stream conversion timed out; inference app will not be updated.'
 }
 
+# Container Apps resolves these versionless references through managed identity.
 $keyVaultUri = "https://$($env:AZURE_KEY_VAULT_NAME).vault.azure.net/secrets"
 $inferenceIdentity = if ($env:INFERENCE_IDENTITY_RESOURCE_ID) { $env:INFERENCE_IDENTITY_RESOURCE_ID } else { 'system' }
 $frontendIdentity = if ($env:FRONTEND_IDENTITY_RESOURCE_ID) { $env:FRONTEND_IDENTITY_RESOURCE_ID } else { 'system' }
@@ -142,6 +147,7 @@ az containerapp secret set --name $env:SERVICE_FRONTEND_NAME --resource-group $e
     "entra-client-secret=keyvaultref:${keyVaultUri}/entra-client-secret,identityref:${frontendIdentity}" --output none
 if ($LASTEXITCODE -ne 0) { throw 'Could not configure frontend secrets.' }
 
+# Preserve existing redirects while registering the generated Container Apps callback.
 $callbackUri = "$($env:SERVICE_FRONTEND_URI)/.auth/login/aad/callback"
 $existingRedirectUris = @(
     az ad app show --id $env:ENTRA_CLIENT_ID --query web.redirectUris --output tsv
@@ -164,6 +170,7 @@ az containerapp auth update --name $env:SERVICE_FRONTEND_NAME --resource-group $
     --yes --output none
 if ($LASTEXITCODE -ne 0) { throw 'Could not enforce Container Apps authentication.' }
 
+# These updates create revisions only after artifacts, secrets, and auth are ready.
 Write-Host 'Artifact conversion succeeded; promoting inference image.'
 az containerapp update --name $env:SERVICE_INFERENCE_NAME --resource-group $env:AZURE_RESOURCE_GROUP `
     --container-name inference `

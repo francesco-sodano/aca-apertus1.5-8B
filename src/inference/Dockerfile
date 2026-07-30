@@ -2,7 +2,7 @@ FROM ghcr.io/swiss-ai/vllm_apertus_1.5_release:latest-amd64@sha256:d85533f251c82
 
 LABEL org.opencontainers.image.source="https://github.com/francesco-sodano/aca-apertus1.5-8B"
 LABEL org.opencontainers.image.description="Apertus 1.5 8B on the Swiss AI vLLM fork"
-LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.licenses="Apache-2.0 AND MIT"
 
 USER root
 
@@ -11,6 +11,7 @@ RUN groupadd --system --gid 10001 appuser \
     && mkdir -p /home/appuser/hf-home/.vllm-cache \
     && chown -R appuser:appuser /home/appuser
 
+COPY LICENSE /licenses/aca-apertus-1.5-8b-MIT.txt
 COPY docker-entrypoint.sh /usr/local/bin/apertus-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/apertus-entrypoint.sh
 

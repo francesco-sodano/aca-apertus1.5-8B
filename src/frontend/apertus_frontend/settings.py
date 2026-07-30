@@ -1,3 +1,5 @@
+"""Validated runtime configuration loaded from Container Apps environment values."""
+
 from __future__ import annotations
 
 import os
@@ -6,6 +8,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Settings:
+    """Immutable frontend dependency endpoints, limits, and timeout settings."""
     model_endpoint: str
     model_id: str
     vllm_api_key: str

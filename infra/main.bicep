@@ -102,7 +102,6 @@ var groundingDeploymentName = 'gpt-4.1-nano-grounding'
 var groundingModelName = 'gpt-4.1-nano'
 var groundingModelVersion = '2025-04-14'
 var bootstrapImage = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest@sha256:e9b3e7c34664c7cffd7144864b0e4eec369bfde80068f9095dc63b37058bec48'
-var mcapsDiagnosticStorageName = toLower('mcaps${substring(replace(subscription().subscriptionId, '-', ''), 16)}')
 
 var commonTags = union(tags, {
   'azd-env-name': environmentName
@@ -425,11 +424,6 @@ resource foundryProjectUser 'Microsoft.Authorization/roleAssignments@2022-04-01'
   }
 }
 
-resource mcapsDiagnosticStorage 'Microsoft.Storage/storageAccounts@2023-01-01' existing = {
-  name: mcapsDiagnosticStorageName
-  scope: resourceGroup('McapsGovernance')
-}
-
 resource foundryProjectDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
   name: 'apertus-project-diagnostics'
   scope: foundryProject
@@ -446,7 +440,7 @@ resource foundryProjectDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-0
         enabled: true
       }
     ]
-    storageAccountId: mcapsDiagnosticStorage.id
+    workspaceId: logAnalytics.outputs.resourceId
   }
 }
 

@@ -1,3 +1,5 @@
+"""Bounded retries, circuit breaking, rate limiting, and admission control."""
+
 from __future__ import annotations
 
 import asyncio
@@ -34,6 +36,7 @@ class RetryPolicy:
 
 
 class AsyncCircuitBreaker:
+    """Stop calling a repeatedly failing dependency until its recovery window."""
     def __init__(
         self,
         *,
@@ -81,6 +84,7 @@ async def retry_async(
     is_retryable: Callable[[Exception], bool],
     policy: RetryPolicy,
 ) -> T:
+    """Retry transient failures with server hints or jittered exponential delay."""
     for attempt in range(1, policy.attempts + 1):
         try:
             return await operation()
@@ -109,6 +113,7 @@ def is_retryable_service_error(exc: Exception) -> bool:
 
 
 class RequestAdmissionController:
+    """Enforce per-user request rate and per-replica concurrent capacity."""
     def __init__(
         self,
         *,

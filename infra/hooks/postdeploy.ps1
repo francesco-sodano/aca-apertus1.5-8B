@@ -5,6 +5,7 @@ if ([string]::IsNullOrWhiteSpace($env:AZURE_CONTAINER_REGISTRY_NAME)) {
     throw 'Container Registry name is missing; the deployment build window cannot be closed.'
 }
 
+# Always restore the private, export-disabled registry posture before exposure.
 az acr update --name $env:AZURE_CONTAINER_REGISTRY_NAME `
     --allow-exports false --public-network-enabled false --default-action Deny --output none
 if ($LASTEXITCODE -ne 0) { throw 'Failed to close the authenticated ACR build window.' }
@@ -14,6 +15,7 @@ if ([string]::IsNullOrWhiteSpace($env:SERVICE_FRONTEND_NAME) -or
     throw 'Frontend app name or resource group is missing; authenticated ingress cannot be enabled.'
 }
 
+# The real frontend image and Entra provider are ready, so external ingress can open.
 az containerapp ingress enable --name $env:SERVICE_FRONTEND_NAME --resource-group $env:AZURE_RESOURCE_GROUP `
     --type external --allow-insecure false --target-port 8000 --transport auto --output none
 if ($LASTEXITCODE -ne 0) { throw 'Failed to enable authenticated frontend ingress.' }
@@ -26,6 +28,7 @@ if ([string]::IsNullOrWhiteSpace($env:SERVICE_FRONTEND_URI) -or
 
 $healthToken = $env:MODEL_HEALTH_TOKEN
 
+# Prewarm is best effort: scale-to-zero remains valid when the model is cold.
 Write-Host 'Prewarming the inference replica. The first model load can take 10-15 minutes.'
 $headers = @{ Authorization = "Bearer $healthToken" }
 for ($attempt = 1; $attempt -le 40; $attempt++) {

@@ -19,7 +19,7 @@ RUN groupadd --system --gid 10001 appuser \
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock README.md LICENSE ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY --chown=appuser:appuser .chainlit/config.toml ./.chainlit/config.toml

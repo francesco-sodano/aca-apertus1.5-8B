@@ -3,6 +3,7 @@ set -u
 
 : "${AZURE_CONTAINER_REGISTRY_NAME:?Container Registry name is missing; the deployment build window cannot be closed}"
 
+# Always restore the private, export-disabled registry posture before exposure.
 if ! az acr update \
   --name "${AZURE_CONTAINER_REGISTRY_NAME}" \
   --allow-exports false \
@@ -18,6 +19,7 @@ if [[ -z "${SERVICE_FRONTEND_NAME:-}" || -z "${AZURE_RESOURCE_GROUP:-}" ]]; then
   exit 1
 fi
 
+# The real frontend image and Entra provider are ready, so external ingress can open.
 if ! az containerapp ingress enable \
   --name "${SERVICE_FRONTEND_NAME}" \
   --resource-group "${AZURE_RESOURCE_GROUP}" \
@@ -37,6 +39,7 @@ fi
 
 health_token="${MODEL_HEALTH_TOKEN}"
 
+# Prewarm is best effort: scale-to-zero remains valid when the model is cold.
 echo 'Prewarming the inference replica. The first model load can take 10-15 minutes.'
 for attempt in $(seq 1 40); do
   if curl --fail --silent --show-error --max-time 35 \

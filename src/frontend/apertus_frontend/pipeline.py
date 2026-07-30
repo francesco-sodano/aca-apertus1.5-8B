@@ -1,3 +1,5 @@
+"""Safety-gated chat orchestration with deterministic and semantic web routing."""
+
 from __future__ import annotations
 
 import base64
@@ -293,6 +295,9 @@ class GroundedCompletionService:
         )
         groundedness_fallback_used = False
         if grounding_sources and grounded is not True:
+            # Groundedness Detection is a preview API and can reject an otherwise
+            # supported answer, especially across languages. Retry generation
+            # once, then use only the cited and policy-screened search summary.
             await _report_progress(on_progress, ProgressStage.REFINING)
             retry_completion = await self._model.complete(
                 request=request,
@@ -424,6 +429,7 @@ class GroundedCompletionService:
 
 
 def grounding_route_hint(request: ChatRequest) -> bool | None:
+    """Return an obvious route or defer ambiguous factual intent to Foundry."""
     current = request.text.strip()
     if (
         _WEB_GROUNDING_PATTERN.search(current)
@@ -446,6 +452,7 @@ def grounding_route_hint(request: ChatRequest) -> bool | None:
 
 
 def grounding_query(request: ChatRequest) -> str:
+    """Build a standalone query while preserving recent reference context."""
     current = request.text.strip() or _media_grounding_query(request.attachments)
     if not request.history:
         return current

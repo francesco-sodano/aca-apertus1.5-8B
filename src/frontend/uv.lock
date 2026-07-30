@@ -130,7 +130,7 @@ wheels = [
 [[package]]
 name = "apertus-frontend"
 version = "1.5.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "azure-identity" },
     { name = "azure-monitor-opentelemetry" },

@@ -1,3 +1,5 @@
+"""OpenAI-compatible Apertus client and evidence-aware prompt construction."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -79,6 +81,7 @@ GENERAL_SYSTEM_INSTRUCTIONS = f"""{IDENTITY_INSTRUCTIONS}
 
 
 class VllmGateway:
+    """Call the private vLLM endpoint without exposing model-controlled tools."""
     def __init__(
         self,
         *,
@@ -183,6 +186,7 @@ class VllmGateway:
 def _build_messages(
     request: ChatRequest, grounding: GroundingPacket
 ) -> list[dict[str, Any]]:
+    """Select grounded instructions only when approved retrieval evidence exists."""
     sources = (
         "\n".join(
             f"[{index}] {citation.title}: {citation.url}"

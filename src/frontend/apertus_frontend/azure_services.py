@@ -1,3 +1,5 @@
+"""Managed-identity clients for Content Safety and Foundry Web Search."""
+
 from __future__ import annotations
 
 import json
@@ -52,6 +54,7 @@ class AsyncTokenCredential(Protocol):
 
 
 class AzureContentSafetyGateway:
+    """Apply prompt, content, image, evidence, and groundedness policy checks."""
     def __init__(
         self,
         *,
@@ -185,6 +188,7 @@ class AzureContentSafetyGateway:
 
 
 class FoundryWebSearchGateway:
+    """Classify freshness intent and retrieve one cited public-web evidence packet."""
     def __init__(
         self,
         *,
@@ -346,6 +350,7 @@ def _blocked_category(payload: dict[str, Any], threshold: int) -> str | None:
 def _blocked_category_details(
     payload: dict[str, Any], threshold: int
 ) -> tuple[str, int] | None:
+    """Return the first Content Safety category at or above the block threshold."""
     for item in payload.get("categoriesAnalysis") or []:
         severity = int(item.get("severity") or 0)
         if severity >= threshold:
@@ -356,6 +361,7 @@ def _blocked_category_details(
 def _extract_foundry_result(
     payload: dict[str, Any],
 ) -> tuple[str, tuple[Citation, ...]]:
+    """Extract response text and deduplicated URLs from nested Responses output."""
     texts: list[str] = []
     inline_citations: list[Citation] = []
     included_sources: list[Citation] = []

@@ -27,5 +27,5 @@ development, `az login` is usually sufficient. Content Safety remains mandatory.
 Foundry grounding is adaptive and fail-closed for changing facts; stable
 explanations and writing tasks bypass Web Search.
 
-Raw audio is intentionally not moderated. See
-[security-and-grounding.md](../../docs/security-and-grounding.md).
+Raw audio is intentionally not moderated by Azure AI Content Safety. Disable
+audio uploads if the target policy requires spoken-content moderation.

@@ -1,11 +1,16 @@
-.azure/*
-!.azure/deployment-plan.md
+.azure/
+.ruff_cache/
+docs/architecture.md
+docs/operations.md
+docs/security-and-grounding.md
 
 infra/main.json
 
 **/__pycache__/
 **/.pytest_cache/
 **/*.pyc
+**/*.egg-info/
+src/frontend/build/
 src/frontend/.venv/
 src/frontend/.chainlit/translations/
 

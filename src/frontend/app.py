@@ -1,3 +1,5 @@
+"""Chainlit and health endpoints for the authenticated Apertus frontend."""
+
 from __future__ import annotations
 
 import base64

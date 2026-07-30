@@ -16,6 +16,7 @@ set -euo pipefail
 image_tag="${APERTUS_IMAGE_TAG:-1.5.0-$(git rev-parse --short=12 HEAD 2>/dev/null || echo local)}"
 inference_repository='apertus/inference'
 
+# Bootstrap secrets are now in Key Vault; remove source copies from local azd state.
 azd env set APPLICATION_SECRETS_READY true >/dev/null
 azd env set HF_TOKEN '' >/dev/null
 azd env set ENTRA_CLIENT_SECRET '' >/dev/null
@@ -30,6 +31,7 @@ if [[ -z "${acr_resource_id}" ]]; then
   exit 1
 fi
 
+# Do not push private images until both runtime identities can pull from ACR.
 for identity in \
   "frontend:${FRONTEND_IDENTITY_PRINCIPAL_ID}" \
   "inference:${INFERENCE_IDENTITY_PRINCIPAL_ID}"; do
@@ -52,6 +54,7 @@ for identity in \
   printf 'AcrPull confirmed for the %s identity.\n' "${identity_name}"
 done
 
+# ACR Tasks is Microsoft hosted, so the private registry opens only for the build.
 echo 'Opening the authenticated ACR build window.'
 az acr update \
   --name "${AZURE_CONTAINER_REGISTRY_NAME}" \
@@ -108,6 +111,7 @@ else
   fi
 fi
 
+# The GPU app is promoted only after the exact immutable tag is streamable.
 streaming_status="$(az acr artifact-streaming operation show \
   --name "${AZURE_CONTAINER_REGISTRY_NAME}" \
   --image "${inference_repository}:${image_tag}" \
@@ -151,6 +155,7 @@ if [[ "${streaming_status}" != 'Succeeded' ]]; then
   exit 1
 fi
 
+# Container Apps resolves these versionless references through managed identity.
 key_vault_uri="https://${AZURE_KEY_VAULT_NAME}.vault.azure.net/secrets"
 az containerapp secret set \
   --name "${SERVICE_INFERENCE_NAME}" \
@@ -169,6 +174,7 @@ az containerapp secret set \
     "entra-client-secret=keyvaultref:${key_vault_uri}/entra-client-secret,identityref:${FRONTEND_IDENTITY_RESOURCE_ID:-system}" \
   --output none
 
+# Preserve existing redirects while registering the generated Container Apps callback.
 callback_uri="${SERVICE_FRONTEND_URI}/.auth/login/aad/callback"
 redirect_uris=("${callback_uri}")
 while IFS= read -r existing_redirect_uri; do
@@ -204,6 +210,7 @@ az containerapp auth update \
   --yes \
   --output none
 
+# These updates create revisions only after artifacts, secrets, and auth are ready.
 echo 'Artifact conversion succeeded; promoting inference image.'
 az containerapp update \
   --name "${SERVICE_INFERENCE_NAME}" \
