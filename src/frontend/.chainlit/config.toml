@@ -1,0 +1,59 @@
+[project]
+enable_telemetry = false
+session_timeout = 3600
+user_session_timeout = 1296000
+cache = false
+persist_user_env = false
+mask_user_env = true
+transports = ["websocket"]
+user_env = []
+
+[features]
+unsafe_allow_html = false
+latex = true
+user_message_markdown = true
+auto_tag_thread = true
+allow_thread_sharing = false
+
+[features.spontaneous_file_upload]
+enabled = true
+accept = [
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "audio/wav",
+  "audio/mpeg",
+  "audio/mp4",
+  "audio/ogg",
+  "audio/webm",
+]
+max_files = 5
+max_size_mb = 10
+
+[features.audio]
+enabled = false
+sample_rate = 24000
+
+[features.mcp]
+enabled = false
+
+[UI]
+name = "Apertus 1.5 on Azure"
+description = "A grounded, safety-gated Apertus experience on Azure Container Apps"
+default_theme = "light"
+cot = "hidden"
+confirm_new_chat = true
+alert_style = "modern"
+custom_css = "/public/custom.css"
+custom_meta_image_url = "/public/logo_light.png"
+
+[[UI.header_links]]
+name = "Source"
+display_name = "Source"
+icon_url = "/public/swiss-flag.svg"
+url = "https://github.com/francesco-sodano/aca-apertus1.5-8B"
+target = "_blank"
+
+[meta]
+generated_by = "2.11.1"

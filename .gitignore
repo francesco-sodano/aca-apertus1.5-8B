@@ -1,0 +1,14 @@
+.azure/*
+!.azure/deployment-plan.md
+
+infra/main.json
+
+**/__pycache__/
+**/.pytest_cache/
+**/*.pyc
+src/frontend/.venv/
+src/frontend/.chainlit/translations/
+
+.env
+.env.*
+!.env.example

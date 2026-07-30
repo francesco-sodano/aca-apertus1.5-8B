@@ -1,0 +1,48 @@
+:root {
+  --apertus-red: #d52b3f;
+  --azure-blue: #1787c9;
+}
+
+body {
+  background-image:
+    linear-gradient(rgba(23, 135, 201, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(23, 135, 201, 0.035) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+header {
+  border-bottom: 2px solid color-mix(in srgb, var(--apertus-red) 70%, transparent);
+}
+
+img[alt="logo"] {
+  width: min(440px, 76vw) !important;
+  max-width: 76vw !important;
+  height: auto !important;
+}
+
+button,
+textarea,
+input {
+  letter-spacing: 0;
+}
+
+[data-testid="chat-input"] {
+  box-shadow: 0 8px 28px rgba(21, 34, 50, 0.1);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  main {
+    animation: apertus-enter 300ms ease-out both;
+  }
+}
+
+@keyframes apertus-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

@@ -1,0 +1,53 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: aca-apertus-1-5-8b
+infra:
+  provider: bicep
+  path: infra
+  module: main
+
+hooks:
+  preprovision:
+    posix:
+      shell: sh
+      run: ./infra/hooks/preprovision.sh
+      interactive: true
+      continueOnError: false
+    windows:
+      shell: pwsh
+      run: ./infra/hooks/preprovision.ps1
+      interactive: true
+      continueOnError: false
+  postprovision:
+    posix:
+      shell: sh
+      run: ./infra/hooks/postprovision.sh
+      interactive: true
+      continueOnError: false
+    windows:
+      shell: pwsh
+      run: ./infra/hooks/postprovision.ps1
+      interactive: true
+      continueOnError: false
+  postdeploy:
+    posix:
+      shell: sh
+      run: ./infra/hooks/postdeploy.sh
+      interactive: true
+      continueOnError: false
+    windows:
+      shell: pwsh
+      run: ./infra/hooks/postdeploy.ps1
+      interactive: true
+      continueOnError: false
+
+# Inference is intentionally absent: azd must never update it before ACR
+# artifact-stream conversion succeeds in postprovision.
+services:
+  frontend:
+    project: ./src/frontend
+    host: containerapp
+    language: docker
+    docker:
+      path: ./Dockerfile
+      context: .

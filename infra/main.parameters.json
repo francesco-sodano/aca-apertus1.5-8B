@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": {
+      "value": "${AZURE_ENV_NAME}"
+    },
+    "deployerPrincipalId": {
+      "value": "${AZURE_PRINCIPAL_ID}"
+    },
+    "location": {
+      "value": "${AZURE_LOCATION=swedencentral}"
+    },
+    "modelRevision": {
+      "value": "${APERTUS_MODEL_REVISION}"
+    },
+    "applicationSecretsReady": {
+      "value": "${APPLICATION_SECRETS_READY=false}"
+    },
+    "rotateApplicationSecrets": {
+      "value": "${ROTATE_APPLICATION_SECRETS=false}"
+    },
+    "entraClientId": {
+      "value": "${ENTRA_CLIENT_ID}"
+    },
+    "entraTenantId": {
+      "value": "${ENTRA_TENANT_ID}"
+    },
+    "alertEmail": {
+      "value": "${ALERT_EMAIL}"
+    },
+    "monthlyBudgetAmount": {
+      "value": "${MONTHLY_BUDGET_AMOUNT=500}"
+    },
+    "huggingFaceToken": {
+      "value": "${HF_TOKEN}"
+    },
+    "vllmApiKey": {
+      "value": "${VLLM_API_KEY}"
+    },
+    "modelHealthToken": {
+      "value": "${MODEL_HEALTH_TOKEN}"
+    },
+    "entraClientSecret": {
+      "value": "${ENTRA_CLIENT_SECRET}"
+    }
+  }
+}

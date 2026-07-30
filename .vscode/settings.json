@@ -1,0 +1,9 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/src/frontend/.venv/Scripts/python.exe",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/src/frontend"
+  ],
+  "terminal.integrated.env.windows": {
+    "PATH": "${env:PATH};${env:LOCALAPPDATA}\\Programs\\Azure Dev CLI"
+  }
+}
