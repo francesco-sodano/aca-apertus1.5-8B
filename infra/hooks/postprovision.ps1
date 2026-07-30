@@ -57,6 +57,21 @@ az acr update --name $env:AZURE_CONTAINER_REGISTRY_NAME `
     --allow-exports true --public-network-enabled true --default-action Allow --output none
 if ($LASTEXITCODE -ne 0) { throw 'Could not open the authenticated ACR build window.' }
 
+$acrDataPlaneReady = $false
+for ($attempt = 1; $attempt -le 6; $attempt++) {
+    az acr repository list --name $env:AZURE_CONTAINER_REGISTRY_NAME `
+        --top 1 --output none 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $acrDataPlaneReady = $true
+        break
+    }
+    if ($attempt -lt 6) {
+        Write-Host "ACR data plane is still propagating ($attempt/6); retrying."
+        Start-Sleep -Seconds 30
+    }
+}
+if (-not $acrDataPlaneReady) { throw 'ACR data plane did not become reachable.' }
+
 Write-Host "Building the immutable inference image in $($env:AZURE_CONTAINER_REGISTRY_NAME)..."
 $imageDigest = az acr repository show --name $env:AZURE_CONTAINER_REGISTRY_NAME `
     --image "${inferenceRepository}:${imageTag}" --query digest --output tsv 2>$null

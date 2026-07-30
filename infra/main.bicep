@@ -363,11 +363,6 @@ module aiServices 'br/public:avm/res/cognitive-services/account:0.17.0' = {
       }
     ]
     roleAssignments: [
-      {
-        principalId: frontendIdentity.outputs.principalId
-        principalType: 'ServicePrincipal'
-        roleDefinitionIdOrName: '53ca6127-db72-4b80-b1b0-d745d6d5456d'
-      }
     ]
     diagnosticSettings: [
       {
@@ -464,11 +459,6 @@ module contentSafety 'br/public:avm/res/cognitive-services/account:0.17.0' = {
     publicNetworkAccess: 'Disabled'
     restrictOutboundNetworkAccess: false
     roleAssignments: [
-      {
-        principalId: frontendIdentity.outputs.principalId
-        principalType: 'ServicePrincipal'
-        roleDefinitionIdOrName: 'Cognitive Services User'
-      }
     ]
     diagnosticSettings: [
       {
@@ -582,6 +572,36 @@ module frontendApp './modules/app/frontend-container-app.bicep' = {
     entraClientId: entraClientId
     entraTenantId: entraTenantId
     tags: commonTags
+  }
+}
+
+resource contentSafetyAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' existing = {
+  name: contentSafetyAccountName
+}
+
+resource frontendFoundryUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(foundryAccount.id, frontendAppName, 'Foundry User')
+  scope: foundryAccount
+  properties: {
+    principalId: frontendApp.outputs.systemAssignedPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId(
+      'Microsoft.Authorization/roleDefinitions',
+      '53ca6127-db72-4b80-b1b0-d745d6d5456d'
+    )
+  }
+}
+
+resource frontendContentSafetyUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(contentSafetyAccount.id, frontendAppName, 'Cognitive Services User')
+  scope: contentSafetyAccount
+  properties: {
+    principalId: frontendApp.outputs.systemAssignedPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId(
+      'Microsoft.Authorization/roleDefinitions',
+      'a97b65f3-24c7-4388-baec-2e87135dc908'
+    )
   }
 }
 

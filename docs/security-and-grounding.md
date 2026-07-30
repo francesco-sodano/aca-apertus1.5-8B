@@ -39,11 +39,14 @@ Apertus. The UI warns the user. Disable audio if this exception is unacceptable.
 
 ## Identity and Secrets
 
-The frontend identity receives ACR pull, Key Vault secret read, Foundry User,
-and Content Safety Cognitive Services User permissions. The inference identity
-only receives ACR pull and Key Vault secret read. The Foundry project identity
-receives Foundry User on its parent account. The deployment principal receives
-Key Vault Secrets Officer to initialize secrets.
+The frontend system-assigned identity receives Foundry User and Content Safety
+Cognitive Services User permissions and is selected implicitly by
+`DefaultAzureCredential`. No identity client ID is injected into the container.
+The frontend user-assigned identity receives only ACR pull and Key Vault secret
+read for platform-managed image pulls and secret references. The inference
+user-assigned identity also receives only ACR pull and Key Vault secret read.
+The Foundry project identity receives Foundry User on its parent account. The
+deployment principal receives Key Vault Secrets Officer to initialize secrets.
 
 The Entra client secret is also a versionless Key Vault reference. Initial values
 and explicit rotations enter through secure ARM parameters, allowing the vault

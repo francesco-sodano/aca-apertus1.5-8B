@@ -18,7 +18,7 @@ resource frontendApp 'Microsoft.App/containerApps@2025-01-01' = {
   name: name
   location: location
   identity: {
-    type: 'UserAssigned'
+    type: 'SystemAssigned, UserAssigned'
     userAssignedIdentities: {
       '${identityResourceId}': {}
     }
@@ -231,3 +231,4 @@ resource authConfig 'Microsoft.App/containerApps/authConfigs@2025-01-01' = if (c
 output name string = frontendApp.name
 output resourceId string = frontendApp.id
 output fqdn string = frontendApp.properties.configuration.ingress.fqdn
+output systemAssignedPrincipalId string = frontendApp.identity.principalId!

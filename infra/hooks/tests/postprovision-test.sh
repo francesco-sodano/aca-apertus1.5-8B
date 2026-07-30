@@ -24,6 +24,12 @@ fi
 if [[ "$*" == *'role assignment list'* ]]; then
   printf 'AcrPull\n'
 fi
+if [[ "$*" == *'acr repository list'* ]]; then
+  readiness_count="$(grep -c 'acr repository list' "${MOCK_LOG}" || true)"
+  if [[ "${readiness_count}" -lt "${MOCK_ACR_READY_AFTER:-1}" ]]; then
+    exit 1
+  fi
+fi
 if [[ "$*" == *'acr repository show'* ]]; then
   if [[ "${MOCK_IMAGE_EXISTS:-false}" == 'true' ]]; then
     printf 'sha256:existing\n'
@@ -45,7 +51,13 @@ set -euo pipefail
 printf 'azd %s\n' "$*" >>"${MOCK_LOG}"
 EOF
 
-chmod +x "${temp_dir}/az" "${temp_dir}/azd"
+cat >"${temp_dir}/sleep" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'sleep %s\n' "$*" >>"${MOCK_LOG}"
+EOF
+
+chmod +x "${temp_dir}/az" "${temp_dir}/azd" "${temp_dir}/sleep"
 
 run_hook() {
   local status="$1"
@@ -53,12 +65,14 @@ run_hook() {
   local secrets_exist="${3:-false}"
   local image_exists="${4:-false}"
   local conversion_exists="${5:-false}"
+  local acr_ready_after="${6:-1}"
   PATH="${temp_dir}:${PATH}" \
   MOCK_LOG="${log_file}" \
   MOCK_STREAMING_STATUS="${status}" \
   MOCK_SECRETS_EXIST="${secrets_exist}" \
   MOCK_IMAGE_EXISTS="${image_exists}" \
   MOCK_CONVERSION_EXISTS="${conversion_exists}" \
+  MOCK_ACR_READY_AFTER="${acr_ready_after}" \
   AZURE_CONTAINER_REGISTRY_NAME='testregistry' \
   AZURE_CONTAINER_REGISTRY_ENDPOINT='testregistry.azurecr.io' \
   AZURE_KEY_VAULT_NAME='test-vault' \
@@ -142,6 +156,17 @@ if grep -q 'acr build' "${conversion_resume_log}" || grep -q 'artifact-streaming
 fi
 if ! grep -q 'containerapp update' "${conversion_resume_log}"; then
   echo 'Conversion resume path did not continue through promotion.' >&2
+  exit 1
+fi
+
+propagation_resume_log="${temp_dir}/propagation-resume.log"
+run_hook 'Succeeded' "${propagation_resume_log}" 'false' 'true' 'true' '3'
+if [[ "$(grep -c 'acr repository list' "${propagation_resume_log}")" -ne 3 ]]; then
+  echo 'ACR data-plane readiness was not retried through transient propagation.' >&2
+  exit 1
+fi
+if grep -q 'acr build' "${propagation_resume_log}"; then
+  echo 'A transient ACR data-plane delay caused an existing image to be rebuilt.' >&2
   exit 1
 fi
 

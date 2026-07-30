@@ -60,6 +60,25 @@ az acr update \
   --default-action Allow \
   --output none
 
+acr_data_plane_ready='false'
+for attempt in $(seq 1 6); do
+  if az acr repository list \
+    --name "${AZURE_CONTAINER_REGISTRY_NAME}" \
+    --top 1 \
+    --output none 2>/dev/null; then
+    acr_data_plane_ready='true'
+    break
+  fi
+  if [[ "${attempt}" != '6' ]]; then
+    printf 'ACR data plane is still propagating (%s/6); retrying.\n' "${attempt}"
+    sleep 30
+  fi
+done
+if [[ "${acr_data_plane_ready}" != 'true' ]]; then
+  echo 'ACR data plane did not become reachable.' >&2
+  exit 1
+fi
+
 echo "Building the immutable inference image in ${AZURE_CONTAINER_REGISTRY_NAME}..."
 image_digest="$(az acr repository show \
   --name "${AZURE_CONTAINER_REGISTRY_NAME}" \

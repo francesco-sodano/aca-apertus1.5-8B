@@ -12,7 +12,7 @@ The Bicep deployment creates one Sweden Central resource group containing:
 | Premium ACR | Remote builds and mandatory inference artifact streaming |
 | Storage account and Azure Files | Persistent Hugging Face and vLLM caches |
 | Key Vault | Hugging Face token, vLLM API key, and operator health token |
-| Two user-assigned identities | Separate frontend and inference permissions |
+| Managed identities | Frontend system identity for SDK calls; separate user identities for ACR and Key Vault |
 | Foundry account and project | Forced Web Search and `gpt-5-mini` grounding deployment |
 | Content Safety account | Text, image, Prompt Shields, and groundedness checks |
 | Log Analytics and Application Insights | Platform logs, application telemetry, and dependencies |
