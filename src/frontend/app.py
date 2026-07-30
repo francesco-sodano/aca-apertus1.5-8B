@@ -325,6 +325,10 @@ def _progress_text(stage: ProgressStage, profile: ChatProfile) -> str:
         return "Deciding whether live sources are needed..."
     if stage is ProgressStage.SEARCHING_WEB:
         return "Using Web Search for fresh sources..."
+    if stage is ProgressStage.REFINING:
+        return "Tightening the answer to the sources..."
+    if stage is ProgressStage.USING_SEARCH_SUMMARY:
+        return "Using the cited search summary..."
     if stage is ProgressStage.CHECKING_OUTPUT:
         return "Checking the answer for safety and grounding..."
     if profile is ChatProfile.THINKING:

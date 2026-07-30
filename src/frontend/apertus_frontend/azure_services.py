@@ -274,8 +274,11 @@ class FoundryWebSearchGateway:
             request_body: dict[str, Any] = {
                 "model": self._model,
                 "instructions": (
-                    "Search the web and return only concise factual evidence "
-                    "useful for another model. Keep the response under 400 words."
+                    "Search the web and produce a concise, self-contained answer "
+                    "grounded only in the retrieved sources. Follow the user's "
+                    "requested language and output format. This response may be "
+                    "shown directly if downstream validation is inconclusive. "
+                    "Do not mention internal processing. Keep it under 400 words."
                 ),
                 "input": query,
                 "max_output_tokens": 600,

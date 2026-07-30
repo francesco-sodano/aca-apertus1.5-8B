@@ -14,10 +14,12 @@
 
 There is no application path to vLLM until required input checks succeed.
 Requests involving changing information also require Foundry evidence and Prompt
-Shields approval. Such requests are refused when Foundry, vLLM, output safety,
-or groundedness fails. Stable explanations, transformations, and writing tasks
-do not pay the web-search latency. Citations are best-effort display metadata,
-not a response gate.
+Shields approval. If the preview Groundedness detector does not approve an
+Apertus answer, the application retries once. A second inconclusive result uses
+the cited, Prompt-Shielded, output-moderated Web Search summary instead of
+discarding successful retrieval. Requests are still refused when no cited safe
+fallback exists. Stable explanations, transformations, and writing tasks do not
+pay the web-search latency.
 
 Safety checks include:
 

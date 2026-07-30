@@ -28,6 +28,7 @@ from apertus_frontend.pipeline import (
 class FakeSafety:
     blocked_purpose: str = ""
     grounded: bool | None = True
+    grounded_results: list[bool | None] = field(default_factory=list)
     text_purposes: list[str] = field(default_factory=list)
     image_calls: int = 0
     grounding_calls: int = 0
@@ -52,6 +53,8 @@ class FakeSafety:
         self, *, query: str, answer: str, sources: tuple[str, ...]
     ) -> bool | None:
         self.groundedness_sources = sources
+        if self.grounded_results:
+            return self.grounded_results.pop(0)
         return self.grounded
 
 
@@ -193,27 +196,82 @@ async def test_image_is_moderated_before_apertus():
 
 
 @pytest.mark.asyncio
-async def test_ungrounded_output_is_not_returned():
-    service, _, _, model = make_service(safety=FakeSafety(grounded=False))
+async def test_ungrounded_output_without_citations_is_not_returned():
+    service, _, _, model = make_service(
+        safety=FakeSafety(grounded=False),
+        grounding=FakeGrounding(GroundingPacket(summary="Uncited evidence")),
+    )
 
     with pytest.raises(GroundingUnavailableError):
         await service.complete(
             ChatRequest(text="What is the current score?"), ChatProfile.TOOLS
         )
 
-    assert model.calls == 1
+    assert model.calls == 2
 
 
 @pytest.mark.asyncio
 async def test_indeterminate_groundedness_is_not_returned():
-    service, _, _, model = make_service(safety=FakeSafety(grounded=None))
+    service, _, _, model = make_service(
+        safety=FakeSafety(grounded=None),
+        grounding=FakeGrounding(GroundingPacket(summary="Uncited evidence")),
+    )
 
     with pytest.raises(GroundingUnavailableError):
         await service.complete(
             ChatRequest(text="What is the current score?"), ChatProfile.TOOLS
         )
 
-    assert model.calls == 1
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_groundedness_retry_can_recover_a_false_negative():
+    safety = FakeSafety(grounded_results=[False, True])
+    service, _, _, model = make_service(safety=safety)
+
+    result = await service.complete(
+        ChatRequest(text="What is the current score?"), ChatProfile.TOOLS
+    )
+
+    assert result.answer == "Grounded answer"
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_repeated_false_negative_returns_cited_search_summary():
+    service, _, _, model = make_service(safety=FakeSafety(grounded=False))
+
+    result = await service.complete(
+        ChatRequest(text="Who are the current council members?"),
+        ChatProfile.TOOLS,
+    )
+
+    assert result.answer == "Verified evidence"
+    assert result.citations == safe_packet().citations
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_groundedness_recovery_reports_refinement_and_summary_fallback():
+    service, _, _, _ = make_service(safety=FakeSafety(grounded=False))
+    stages: list[ProgressStage] = []
+
+    async def record(stage: ProgressStage) -> None:
+        stages.append(stage)
+
+    await service.complete(
+        ChatRequest(text="Who are the current council members?"),
+        ChatProfile.TOOLS,
+        on_progress=record,
+    )
+
+    assert stages[-4:] == [
+        ProgressStage.CHECKING_OUTPUT,
+        ProgressStage.REFINING,
+        ProgressStage.CHECKING_OUTPUT,
+        ProgressStage.USING_SEARCH_SUMMARY,
+    ]
 
 
 @pytest.mark.asyncio
@@ -310,7 +368,11 @@ async def test_ambiguous_factual_request_uses_semantic_router():
     )
 
     assert grounding.route_calls == 1
-    assert grounding.queries == ["Voyager 1 communications status"]
+    assert grounding.queries == [
+        "Search objective: Voyager 1 communications status\n"
+        "User request and response requirements: Has Voyager 1 recovered "
+        "communications?"
+    ]
     assert model.calls == 1
 
 
@@ -381,6 +443,34 @@ async def test_empty_semantic_search_query_preserves_original_request():
     )
 
     assert grounding.queries == ["Has Voyager 1 recovered communications?"]
+
+
+@pytest.mark.asyncio
+async def test_semantic_search_preserves_user_response_requirements():
+    grounding = FakeGrounding(
+        safe_packet(),
+        decision=GroundingDecision(
+            use_web=True,
+            search_query="The Odyssey 2026 Christopher Nolan plot",
+        ),
+    )
+    service, _, _, _ = make_service(grounding=grounding)
+
+    await service.complete(
+        ChatRequest(
+            text=(
+                "give me the plot of The Odyssey (2026 film by Christopher "
+                "Nolan) in Romansh"
+            )
+        ),
+        ChatProfile.TOOLS,
+    )
+
+    assert grounding.queries == [
+        "Search objective: The Odyssey 2026 Christopher Nolan plot\n"
+        "User request and response requirements: give me the plot of The Odyssey "
+        "(2026 film by Christopher Nolan) in Romansh"
+    ]
 
 
 @pytest.mark.asyncio

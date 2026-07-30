@@ -198,6 +198,8 @@ async def test_web_search_uses_model_compatible_latency_controls(
 
     assert ("reasoning" in client.body) is expects_reasoning
     assert ("text" in client.body) is expects_reasoning
+    assert "shown directly" in client.body["instructions"]
+    assert "requested language" in client.body["instructions"]
     assert client.body["tools"][0]["search_context_size"] == "low"
 
 

@@ -57,6 +57,8 @@ class ProgressStage(StrEnum):
     SELECTING_TOOLS = "selecting-tools"
     SEARCHING_WEB = "searching-web"
     GENERATING = "generating"
+    REFINING = "refining"
+    USING_SEARCH_SUMMARY = "using-search-summary"
     CHECKING_OUTPUT = "checking-output"
 
 
@@ -262,8 +264,15 @@ class GroundedCompletionService:
         grounding = GroundingPacket(summary="")
         if grounding_required:
             await _report_progress(on_progress, ProgressStage.SEARCHING_WEB)
-            query = decision.search_query.strip() or query
-            grounding = await self._get_safe_grounding(query)
+            search_query = decision.search_query.strip()
+            if search_query and search_query != query:
+                search_query = (
+                    f"Search objective: {search_query}\n"
+                    f"User request and response requirements: {query}"
+                )
+            else:
+                search_query = query
+            grounding = await self._get_safe_grounding(search_query)
 
         await _report_progress(on_progress, ProgressStage.GENERATING)
         completion = await self._model.complete(
@@ -274,27 +283,56 @@ class GroundedCompletionService:
         )
 
         await _report_progress(on_progress, ProgressStage.CHECKING_OUTPUT)
-        await self._safety.screen_text(completion.answer, purpose="model-output")
-        grounding_sources = tuple(
-            source
-            for source in (grounding.summary, *completion.grounding_sources)
-            if source.strip()
+        citations = _unique_citations(
+            (*grounding.valid_citations, *completion.citations)
         )
-        grounded: bool | None = None
-        if grounding_sources:
-            grounded = await self._safety.is_grounded(
-                query=query,
-                answer=completion.answer,
-                sources=grounding_sources,
+        grounded, grounding_sources = await self._validate_completion(
+            query=query,
+            completion=completion,
+            grounding=grounding,
+        )
+        groundedness_fallback_used = False
+        if grounding_sources and grounded is not True:
+            await _report_progress(on_progress, ProgressStage.REFINING)
+            retry_completion = await self._model.complete(
+                request=request,
+                profile=profile,
+                grounding=grounding,
+                search_web=self._get_safe_grounding,
             )
-            if grounded is not True:
+            await _report_progress(on_progress, ProgressStage.CHECKING_OUTPUT)
+            retry_grounded, _ = await self._validate_completion(
+                query=query,
+                completion=retry_completion,
+                grounding=grounding,
+            )
+            if retry_grounded is True:
+                completion = retry_completion
+                grounded = True
+            elif grounding.summary.strip() and citations:
+                await _report_progress(
+                    on_progress, ProgressStage.USING_SEARCH_SUMMARY
+                )
+                await self._safety.screen_text(
+                    grounding.summary, purpose="model-output"
+                )
+                completion = ModelCompletion(answer=grounding.summary)
+                grounded = retry_grounded
+                groundedness_fallback_used = True
+                logger.warning(
+                    "groundedness_fallback_used",
+                    extra={
+                        "custom_dimensions": {
+                            "correlation_id": request.correlation_id,
+                            "citation_count": len(citations),
+                        }
+                    },
+                )
+            else:
                 raise GroundingUnavailableError(
                     "The generated answer did not receive an explicit groundedness approval."
                 )
 
-        citations = _unique_citations(
-            (*grounding.valid_citations, *completion.citations)
-        )
         logger.info(
             "completion_allowed",
             extra={
@@ -306,6 +344,7 @@ class GroundedCompletionService:
                     "web_grounding_required": grounding_required,
                     "grounding_route_source": route_source,
                     "groundedness_checked": grounded is not None,
+                    "groundedness_fallback_used": groundedness_fallback_used,
                     "duration_ms": round((time.perf_counter() - started) * 1000),
                 }
             },
@@ -315,6 +354,28 @@ class GroundedCompletionService:
             citations=citations,
             correlation_id=request.correlation_id,
         )
+
+    async def _validate_completion(
+        self,
+        *,
+        query: str,
+        completion: ModelCompletion,
+        grounding: GroundingPacket,
+    ) -> tuple[bool | None, tuple[str, ...]]:
+        await self._safety.screen_text(completion.answer, purpose="model-output")
+        grounding_sources = tuple(
+            source
+            for source in (grounding.summary, *completion.grounding_sources)
+            if source.strip()
+        )
+        if not grounding_sources:
+            return None, ()
+        grounded = await self._safety.is_grounded(
+            query=query,
+            answer=completion.answer,
+            sources=grounding_sources,
+        )
+        return grounded, grounding_sources
 
     async def _get_safe_grounding(self, query: str) -> GroundingPacket:
         packet = await self._grounding.search(query)
