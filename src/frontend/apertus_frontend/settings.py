@@ -13,8 +13,10 @@ class Settings:
     model_id: str
     vllm_api_key: str
     content_safety_endpoint: str
-    foundry_project_endpoint: str
-    foundry_grounding_model: str
+    webiq_api_key: str
+    webiq_endpoint: str
+    webiq_max_results: int
+    webiq_max_length: int
     content_safety_threshold: int
     max_output_tokens: int
     temperature: float
@@ -30,6 +32,10 @@ class Settings:
             raise ValueError("CONTENT_SAFETY_THRESHOLD must be between 0 and 7.")
         if self.max_output_tokens <= 0:
             raise ValueError("MAX_OUTPUT_TOKENS must be positive.")
+        if not 1 <= self.webiq_max_results <= 50:
+            raise ValueError("WEBIQ_MAX_RESULTS must be between 1 and 50.")
+        if not 1 <= self.webiq_max_length <= 500_000:
+            raise ValueError("WEBIQ_MAX_LENGTH must be between 1 and 500000.")
         if self.max_concurrent_requests <= 0:
             raise ValueError("MAX_CONCURRENT_REQUESTS must be positive.")
         if self.requests_per_minute <= 0:
@@ -44,10 +50,12 @@ class Settings:
             model_id=os.getenv("MODEL_ID", "swiss-ai/Apertus-v1.5-8B"),
             vllm_api_key=_required("VLLM_API_KEY"),
             content_safety_endpoint=_required("CONTENT_SAFETY_ENDPOINT").rstrip("/"),
-            foundry_project_endpoint=_required("FOUNDRY_PROJECT_ENDPOINT").rstrip("/"),
-            foundry_grounding_model=os.getenv(
-                "FOUNDRY_GROUNDING_MODEL", "gpt-4.1-nano-grounding"
-            ),
+            webiq_api_key=_required("WEBIQ_API_KEY"),
+            webiq_endpoint=os.getenv(
+                "WEBIQ_ENDPOINT", "https://api.microsoft.ai/v3/search/web"
+            ).rstrip("/"),
+            webiq_max_results=int(os.getenv("WEBIQ_MAX_RESULTS", "5")),
+            webiq_max_length=int(os.getenv("WEBIQ_MAX_LENGTH", "1500")),
             content_safety_threshold=int(
                 os.getenv("CONTENT_SAFETY_THRESHOLD", "4")
             ),

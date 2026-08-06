@@ -16,14 +16,15 @@ $env:MODEL_ENDPOINT = 'https://<vllm-host>/v1'
 $env:MODEL_ID = 'swiss-ai/Apertus-v1.5-8B'
 $env:VLLM_API_KEY = '<vllm-api-key>'
 $env:CONTENT_SAFETY_ENDPOINT = 'https://<account>.cognitiveservices.azure.com'
-$env:FOUNDRY_PROJECT_ENDPOINT = 'https://<account>.services.ai.azure.com/api/projects/<project>'
-$env:FOUNDRY_GROUNDING_MODEL = 'gpt-4.1-nano-grounding'
+$env:WEBIQ_API_KEY = '<web-iq-api-key>'
+$env:WEBIQ_ENDPOINT = 'https://api.microsoft.ai/v3/search/web'
 $env:MODEL_HEALTH_TOKEN = '<operator-health-token>'
 uv run chainlit run app.py --host 127.0.0.1 --port 8000
 ```
 
-`DefaultAzureCredential` supplies Content Safety and Foundry tokens. For local
-development, `az login` is usually sufficient. Content Safety remains mandatory.
+`DefaultAzureCredential` supplies the Content Safety token. Web IQ uses the API
+key only in the server-side frontend process. For local development, `az login`
+is usually sufficient for Content Safety. Both dependencies remain mandatory.
 
 ## Native tools
 
@@ -37,7 +38,7 @@ Built-ins are defined in [`apertus_frontend/tools.py`](apertus_frontend/tools.py
 
 | Name | Purpose |
 | --- | --- |
-| `search_web` | Foundry Web Search for current or explicitly verified public facts, with Prompt Shield and citations |
+| `search_web` | Microsoft Web IQ passage retrieval for current or explicitly verified public facts, with SafeSearch, Prompt Shield, and citations |
 | `calculator` | Bounded AST-only arithmetic without Python `eval` or arbitrary execution |
 | `get_current_time` | Current date and time for a validated IANA timezone |
 

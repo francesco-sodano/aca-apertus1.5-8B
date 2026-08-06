@@ -161,6 +161,7 @@ class VllmGateway:
         )
         citations: list[Citation] = []
         grounding_sources: list[str] = []
+        grounding_fallback_answer = ""
         selected_tools: list[str] = []
         if tools_enabled:
             selector_messages = [
@@ -230,6 +231,7 @@ class VllmGateway:
                     for citation in result.citations
                 )
                 grounding_sources.extend(result.grounding_sources)
+                grounding_fallback_answer = result.grounding_fallback_answer
                 messages.append(
                     {
                         "role": "assistant",
@@ -264,6 +266,7 @@ class VllmGateway:
             answer=content,
             citations=tuple(citations),
             grounding_sources=tuple(grounding_sources),
+            grounding_fallback_answer=grounding_fallback_answer,
             selected_tools=tuple(selected_tools),
         )
 

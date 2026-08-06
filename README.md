@@ -43,15 +43,16 @@ policies before serving production traffic.
   private endpoints, private DNS zones, and a delegated Container Apps subnet.
 - `Consumption-GPU-NC24-A100` quota in Sweden Central for one 8B inference
   replica.
-- Global Standard quota for `gpt-4.1-nano` in Sweden Central.
+- An enabled [Microsoft Web IQ](https://webiq.microsoft.ai/documentation/overview/)
+  limited-access profile with Web Search permission and an API key.
 - A Hugging Face account that has accepted the Apertus model terms and a
   read-only token.
 - Permission to create and update a single-tenant Microsoft Entra app
   registration used by Container Apps built-in authentication.
 - An operations email address for Azure Monitor and budget notifications.
-- Acceptance of the Grounding with Bing data-boundary terms. Search data can
-  leave Azure compliance and geographic boundaries and is not covered by the
-  Microsoft Data Protection Addendum.
+- Acceptance of the Microsoft Web IQ terms associated with the enabled profile.
+  Web IQ is called through its public HTTPS endpoint; validate its data-handling
+  terms against the target workload.
 - Confirmation that the current Sweden Central serverless GPU fleet supports
   the CUDA and NVIDIA driver requirements of the pinned Swiss AI runtime image.
 
@@ -66,7 +67,7 @@ flowchart TB
 
         subgraph FrontendApp[Frontend Container App - Consumption CPU]
             Chainlit[Chainlit web UI<br/>HTTPS and WebSocket]
-          Pipeline[Application pipeline<br/>Content checks, Apertus tool selection,<br/>citations and progress]
+            Pipeline[Application pipeline<br/>Content checks, Apertus tool selection,<br/>citations and progress]
         end
 
         subgraph InferenceApp[Inference Container App - Consumption-GPU-NC24-A100]
@@ -76,12 +77,7 @@ flowchart TB
         end
     end
 
-    subgraph Foundry[Microsoft Foundry]
-        Project[Foundry project]
-        WebSearch[Web Search grounding]
-        SearchModel[gpt-4.1-nano<br/>search synthesis]
-        Project --> WebSearch --> SearchModel
-    end
+    WebIQ[Microsoft Web IQ v3<br/>ranked passage retrieval]
 
     subgraph SecurityData[Private Azure services]
         Safety[Azure AI Content Safety]
@@ -98,7 +94,7 @@ flowchart TB
 
     User -->|Sign in| Auth --> Chainlit --> Pipeline
     Pipeline -->|Internal HTTPS and API key| VLLM
-    Pipeline -->|Managed identity and Private Link| Project
+    Pipeline -->|Public HTTPS and Key Vault API key| WebIQ
     Pipeline -->|Managed identity and Private Link| Safety
     Vault -->|Key Vault references| FrontendApp
     Vault -->|Key Vault references| InferenceApp
@@ -111,12 +107,10 @@ flowchart TB
     Budget --> ACA
 ```
 
-Only the frontend and inference workloads run in Azure Container Apps.
-Microsoft Foundry owns the grounding project, Web Search integration, and
-`gpt-4.1-nano` deployment. GPT-4.1 nano is used within the Web Search tool to
-retrieve public sources and synthesize a concise cited evidence packet. Apertus
-runs inside the private GPU Container App, selects and uses tools, and writes
-the final answer.
+Only the frontend and inference workloads run in Azure Container Apps. Microsoft
+Web IQ returns ranked, query-relevant passages and source metadata directly.
+Apertus runs inside the private GPU Container App, selects and uses tools,
+reasons over the approved passages, and writes the final answer.
 
 ## Apertus 1.5 Native Tools
 
@@ -145,7 +139,7 @@ The built-in registry contains three tools:
 
 | Tool | Apertus selects it for | Input | Key controls |
 | --- | --- | --- | --- |
-| `search_web` | Current, changing, planned, upcoming, priced, status, news, or explicitly verified public information | Standalone query, maximum 500 characters | Foundry Web Search, latest-user context, Prompt Shield, Content Safety, citations, 120-second timeout |
+| `search_web` | Current, changing, planned, upcoming, priced, status, news, or explicitly verified public information | Standalone query, maximum 500 characters | Web IQ passage retrieval, SafeSearch strict, Prompt Shield, Content Safety, citations, 30-second timeout |
 | `calculator` | Deterministic arithmetic | Numeric expression, maximum 200 characters | AST-only operators, bounded complexity/exponents/results, no `eval`, 2-second timeout |
 | `get_current_time` | Current clock time or calendar date in a requested timezone | IANA timezone such as `Europe/Zurich` | IANA validation, no external network call, 2-second timeout |
 
@@ -163,22 +157,35 @@ orchestration pipeline does not need tool-specific branches. See the
 
 Stable explanations and writing requests skip Web Search. If the preview
 groundedness detector is inconclusive after a search, the application retries
-once and can return the cited, safety-screened Web Search summary rather than
-discard a successful retrieval.
+once and can return a deterministic, cited, safety-screened source-excerpt
+fallback rather than expose raw evidence or an unverified synthesis.
+
+### Grounding latency
+
+A five-query benchmark on August 6, 2026 measured Microsoft Web IQ retrieval
+before Apertus generation:
+
+| Median | Mean | Range |
+| ---: | ---: | ---: |
+| 151 ms | 205 ms | 140-440 ms |
+
+These measurements came from the development workstation and are directional
+rather than an SLA. A live request from the deployed ACA frontend returned five
+citations in 291 ms.
 
 ## Azure Services
 
 | Azure service | Documentation | Why it is included |
 | --- | --- | --- |
 | Azure Container Apps | [Overview](https://learn.microsoft.com/azure/container-apps/overview) and [serverless GPUs](https://learn.microsoft.com/azure/container-apps/gpu-serverless-overview) | Runs the CPU frontend and the isolated A100-backed Apertus inference service with managed scaling and revisions. |
-| Microsoft Foundry | [What is Microsoft Foundry?](https://learn.microsoft.com/azure/ai-foundry/what-is-ai-foundry) and [Web Search](https://learn.microsoft.com/azure/foundry/agents/how-to/tools/web-search) | Hosts GPT-4.1 nano and Web Search to retrieve public sources and synthesize the cited evidence packet used by Apertus. |
+| Microsoft Web IQ | [Overview](https://webiq.microsoft.ai/documentation/overview/) and [Web Search API](https://webiq.microsoft.ai/documentation/api-reference/web/) | Returns ranked passage evidence, source URLs, crawl timestamps, and support trace IDs directly to the frontend. |
 | Azure AI Content Safety | [Overview](https://learn.microsoft.com/azure/ai-services/content-safety/overview) | Screens user text, images, retrieved evidence, and generated output; detects prompt attacks and reports blocked categories. |
 | Azure Container Registry Premium | [Overview](https://learn.microsoft.com/azure/container-registry/container-registry-intro) and [artifact streaming](https://learn.microsoft.com/azure/container-registry/container-registry-artifact-streaming) | Stores private frontend and inference images and accelerates the large inference-image startup path. |
 | Azure Files Premium NFS | [NFS file shares](https://learn.microsoft.com/azure/storage/files/files-nfs-protocol) | Persists model and compilation caches without requiring Storage shared-key authentication in the application. |
-| Azure Key Vault | [Overview](https://learn.microsoft.com/azure/key-vault/general/overview) | Stores the Hugging Face token, internal vLLM API key, health token, and Entra client secret behind RBAC and Private Link. |
-| Azure Virtual Network and Private Link | [Container Apps networking](https://learn.microsoft.com/azure/container-apps/networking) and [Private Link](https://learn.microsoft.com/azure/private-link/private-link-overview) | Isolates runtime traffic and privately connects ACR, Azure Files, Key Vault, Foundry, and Content Safety. |
+| Azure Key Vault | [Overview](https://learn.microsoft.com/azure/key-vault/general/overview) | Stores the Web IQ API key, Hugging Face token, internal vLLM API key, health token, and Entra client secret behind RBAC and Private Link. |
+| Azure Virtual Network and Private Link | [Container Apps networking](https://learn.microsoft.com/azure/container-apps/networking) and [Private Link](https://learn.microsoft.com/azure/private-link/private-link-overview) | Isolates runtime traffic and privately connects ACR, Azure Files, Key Vault, and Content Safety. Web IQ uses its public HTTPS API. |
 | Microsoft Entra ID | [Container Apps authentication](https://learn.microsoft.com/azure/container-apps/authentication) | Requires tenant authentication before users can reach the Chainlit application. |
-| Managed identities for Azure resources | [Overview](https://learn.microsoft.com/entra/identity/managed-identities-azure-resources/overview) | Removes SDK credentials from containers and grants narrowly scoped access to Foundry, Content Safety, ACR, and Key Vault. |
+| Managed identities for Azure resources | [Overview](https://learn.microsoft.com/entra/identity/managed-identities-azure-resources/overview) | Removes SDK credentials from containers and grants narrowly scoped access to Content Safety, ACR, and Key Vault. |
 | Azure Monitor | [Application Insights](https://learn.microsoft.com/azure/azure-monitor/app/app-insights-overview) and [Log Analytics](https://learn.microsoft.com/azure/azure-monitor/logs/log-analytics-overview) | Captures dependency latency, failures, routing decisions, Container Apps logs, and operational alerts without logging prompt bodies. |
 | Azure Cost Management | [Budgets](https://learn.microsoft.com/azure/cost-management-billing/costs/tutorial-acm-create-budgets) | Adds resource-group budget notifications for an intentionally expensive GPU workload. |
 
@@ -191,15 +198,15 @@ and applies least privilege, defense in depth, and private connectivity.
 | Security feature | Implementation |
 | --- | --- |
 | VNet isolation | The Container Apps environment is VNet injected. Apertus inference has internal-only ingress and is reachable only from the frontend over internal HTTPS with an API key. |
-| Private endpoints | ACR, Azure Files, Key Vault, Foundry, and Content Safety use approved private endpoints and private DNS zones. |
+| Private endpoints | ACR, Azure Files, Key Vault, and Content Safety use approved private endpoints and private DNS zones. |
 | User authentication | Container Apps built-in authentication redirects unauthenticated users to a single-tenant Microsoft Entra application. HTTPS is required. |
-| Managed identity | The frontend system identity calls Foundry and Content Safety. Separate user-assigned identities receive only `AcrPull` and `Key Vault Secrets User` for platform image pulls and secret references. No `AZURE_CLIENT_ID` selector is injected into the application container. |
+| Managed identity | The frontend system identity calls Content Safety. Separate user-assigned identities receive only `AcrPull` and `Key Vault Secrets User` for platform image pulls and secret references. No `AZURE_CLIENT_ID` selector is injected into the application container. |
 | No Storage shared keys | Storage shared-key authorization and public network access are disabled. The model cache uses private Premium NFS rather than an application-held account key. |
 | Key Vault protection | Key Vault uses RBAC, purge protection, private access, versionless secret references, and no application secrets in images or committed parameters. |
 | Hardened registry | ACR admin, anonymous access, exports, and public networking are disabled at rest. Deployment opens a short authenticated build window and closes it before verification. Runtime pulls use managed identity over Private Link. |
 | Safety boundary | Input, image, evidence, and output checks run before content reaches the browser. Prompt Shield protects retrieved evidence from indirect prompt injection. Unsafe content remains a hard block. |
 | Tool and grounding boundary | Apertus selects among allowlisted schemas. The broker validates arguments, limits execution, safety-screens outputs, preserves citations, and rejects unknown tools or uncited fallback evidence. |
-| Secret handling | Sensitive bootstrap values enter as secure ARM parameters, are stored in Key Vault, and are cleared from the local azd environment after initialization. |
+| Secret handling | The Web IQ key and other sensitive bootstrap values enter as secure ARM parameters, are stored in Key Vault, and are cleared from the local azd environment after initialization. |
 | Observability privacy | Structured telemetry records stage, duration, result, category, and correlation identifiers, but not raw prompts, attachments, evidence, answers, tokens, or secrets. |
 
 Raw audio is the explicit safety exception: MIME type and size are validated,
@@ -240,11 +247,9 @@ Before deployment, confirm all of the following:
 - Your tenant permits you to create a single-tenant Entra app registration.
 - Sweden Central reports `Consumption-GPU-NC24-A100`, and the subscription has
   capacity for one replica.
-- The subscription has at least 10 Global Standard units for `gpt-4.1-nano` in
-  Sweden Central.
+- Your Microsoft Web IQ profile is active, not expired, and permits Web Search.
 - You accepted the Apertus terms on Hugging Face and created a read-only token.
-- You reviewed the Grounding with Bing data-boundary terms described in
-  [Prerequisites](#prerequisites).
+- You reviewed and accepted the Web IQ terms for your profile.
 
 Check the serverless GPU profile:
 
@@ -336,7 +341,7 @@ azd env set AZURE_RESOURCE_GROUP $resourceGroup
 azd env set AZURE_LOCATION swedencentral
 azd env set APERTUS_MODEL_REVISION $modelRevision
 azd env set ACCEPT_APERTUS_LICENSE true
-azd env set ACCEPT_BING_GROUNDING_TERMS true
+azd env set ACCEPT_WEBIQ_TERMS true
 azd env set HF_TOKEN $huggingFaceToken
 azd env set ENTRA_TENANT_ID $tenantId
 azd env set ENTRA_CLIENT_ID $clientId
@@ -345,15 +350,35 @@ azd env set ALERT_EMAIL $operationsEmail
 azd env set MONTHLY_BUDGET_AMOUNT $monthlyBudget
 ```
 
-The deployment derives globally unique ACR, Storage, Key Vault, Foundry, and
-Content Safety names from the subscription, resource group, and azd environment.
+Load the Web IQ API key through a masked prompt. This temporarily stores the
+value only in the ignored local azd environment so Bicep can write it to the
+private Key Vault:
+
+```powershell
+$secure = Read-Host 'Web IQ API key' -AsSecureString
+$pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+try {
+  $webIqApiKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
+  azd env set WEBIQ_API_KEY $webIqApiKey
+}
+finally {
+  [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+  Remove-Variable secure, pointer, webIqApiKey -ErrorAction SilentlyContinue
+}
+```
+
+Do not print the value with `azd env get-value WEBIQ_API_KEY`. After successful
+provisioning, the hook marks `WEBIQ_SECRET_READY=true`, clears the plaintext azd
+value, and configures the frontend with a versionless Key Vault reference.
+
+The deployment derives globally unique ACR, Storage, Key Vault, and Content
+Safety names from the subscription, resource group, and azd environment.
 Do not set resource names unless your organization requires specific globally
 unique names. Optional overrides are:
 
 - `AZURE_CONTAINER_REGISTRY_NAME`
 - `AZURE_STORAGE_ACCOUNT_NAME`
 - `AZURE_KEY_VAULT_NAME`
-- `AZURE_FOUNDRY_ACCOUNT_NAME`
 - `AZURE_CONTENT_SAFETY_ACCOUNT_NAME`
 
 azd supplies `AZURE_ENV_NAME` and `AZURE_PRINCIPAL_ID`. The preprovision hook
@@ -383,8 +408,9 @@ azd up
 
 1. Runs preflight validation and generates internal secrets.
 2. Provisions the VNet, private endpoints, identities, RBAC, Container Apps,
-   Foundry, Content Safety, Key Vault, storage, ACR, monitoring, and budget.
-3. Stores bootstrap secrets in Key Vault and clears their local azd values.
+   Content Safety, Key Vault, storage, ACR, monitoring, and budget.
+3. Stores the Web IQ key and other bootstrap secrets in Key Vault and clears
+   their local azd values.
 4. Opens a temporary authenticated ACR build window, builds the immutable
    inference image, and requires successful artifact-stream conversion before
    promoting it.
@@ -420,6 +446,16 @@ Both health endpoints must return a JSON status. ACR must report public network
 access disabled, default action `Deny`, exports disabled, and admin disabled.
 The browser must redirect to Microsoft Entra sign-in. After signing in, send one
 prompt to verify that Apertus inference is warm and responding.
+
+Confirm the plaintext Web IQ key was removed from local azd state without
+printing it:
+
+```powershell
+$webIqValue = azd env get-value WEBIQ_API_KEY 2>$null
+if (-not [string]::IsNullOrWhiteSpace($webIqValue)) {
+  throw 'WEBIQ_API_KEY was not cleared after provisioning.'
+}
+```
 
 ### Update the deployment
 
@@ -462,6 +498,31 @@ azd up
 After a successful rotation, the hook clears the source secrets and resets
 `ROTATE_APPLICATION_SECRETS=false`. Remove the old Entra credential only after
 the application is verified.
+
+### Rotate only the Web IQ key
+
+Create a replacement key in [Web IQ Profile Management](https://webiq.microsoft.ai/profiles/),
+then load it with the same masked prompt shown in step 7 and run:
+
+```powershell
+azd env set ROTATE_WEBIQ_SECRET true
+azd up
+```
+
+The hook writes a new `webiq-api-key` Key Vault version, clears the plaintext
+azd value, and resets `ROTATE_WEBIQ_SECRET=false`. Revoke the old Web IQ key only
+after the application passes verification.
+
+### Rotate only the internal vLLM key
+
+```powershell
+azd env set ROTATE_VLLM_SECRET true
+azd up
+```
+
+The preprovision hook generates a new random key, Bicep writes a new
+`vllm-api-key` Key Vault version, and postprovision updates both Container Apps.
+The source value is then cleared and `ROTATE_VLLM_SECRET` resets to `false`.
 
 ### Recover from an interrupted deployment
 
@@ -518,7 +579,12 @@ docker build --check --file src/frontend/Dockerfile src/frontend
 docker build --check --file src/inference/Dockerfile src/inference
 ```
 
-Running the frontend locally requires Content Safety, Foundry, and an
+Frontend image builds use public PyPI by default. A different approved
+PEP 503-compatible registry can be selected without changing tracked files by
+setting `PYTHON_PACKAGE_INDEX_URL` in the local azd environment or passing the
+same Docker build argument explicitly.
+
+Running the frontend locally requires Content Safety, a Web IQ API key, and an
 OpenAI-compatible Apertus endpoint. See
 [the frontend guide](src/frontend/README.md).
 

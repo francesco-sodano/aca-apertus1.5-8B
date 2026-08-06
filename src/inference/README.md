@@ -19,7 +19,9 @@ docker run --rm --gpus all -p 8000:8000 \
 ```
 
 The OpenAI-compatible base URL is `http://localhost:8000/v1`. In Azure, ingress
-is internal and the API key is available only to the Chainlit frontend.
+is internal and the API key is available only to the Chainlit frontend. vLLM
+reads `VLLM_API_KEY` directly from the environment; the entrypoint never copies
+the key into process arguments or dry-run output.
 
 ## Runtime settings
 

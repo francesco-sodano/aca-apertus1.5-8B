@@ -19,7 +19,6 @@ from fastapi import Header, HTTPException, Response, status
 
 from apertus_frontend.azure_services import (
     AzureContentSafetyGateway,
-    FoundryWebSearchGateway,
 )
 from apertus_frontend.pipeline import (
     Attachment,
@@ -34,6 +33,7 @@ from apertus_frontend.pipeline import (
     SafetyBlockedError,
 )
 from apertus_frontend.settings import Settings
+from apertus_frontend.webiq import WebIqSearchGateway
 from apertus_frontend.vllm_gateway import VllmGateway
 from apertus_frontend.resilience import (
     CapacityExceededError,
@@ -61,7 +61,7 @@ class Runtime:
         service: GroundedCompletionService,
         credential: DefaultAzureCredential,
         safety: AzureContentSafetyGateway,
-        grounding: FoundryWebSearchGateway,
+        grounding: WebIqSearchGateway,
         model: VllmGateway,
         admission: RequestAdmissionController,
     ) -> None:
@@ -95,10 +95,11 @@ def get_runtime() -> Runtime:
         credential=credential,
         threshold=settings.content_safety_threshold,
     )
-    grounding = FoundryWebSearchGateway(
-        project_endpoint=settings.foundry_project_endpoint,
-        model=settings.foundry_grounding_model,
-        credential=credential,
+    grounding = WebIqSearchGateway(
+        api_key=settings.webiq_api_key,
+        endpoint=settings.webiq_endpoint,
+        max_results=settings.webiq_max_results,
+        max_length=settings.webiq_max_length,
         timeout_seconds=settings.grounding_timeout_seconds,
     )
     model = VllmGateway(

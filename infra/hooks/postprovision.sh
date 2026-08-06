@@ -39,9 +39,11 @@ trap cleanup_failed_postprovision EXIT
 
 # Bootstrap secrets are now in Key Vault; remove source copies from local azd state.
 azd env set APPLICATION_SECRETS_READY true >/dev/null
+azd env set WEBIQ_SECRET_READY true >/dev/null
 azd env set HF_TOKEN '' >/dev/null
 azd env set ENTRA_CLIENT_SECRET '' >/dev/null
 azd env set VLLM_API_KEY '' >/dev/null
+azd env set WEBIQ_API_KEY '' >/dev/null
 
 acr_resource_id="$(az acr show \
   --name "${AZURE_CONTAINER_REGISTRY_NAME}" \
@@ -193,6 +195,7 @@ az containerapp secret set \
   --secrets \
     "vllm-api-key=keyvaultref:${key_vault_uri}/vllm-api-key,identityref:${FRONTEND_IDENTITY_RESOURCE_ID:-system}" \
     "model-health-token=keyvaultref:${key_vault_uri}/model-health-token,identityref:${FRONTEND_IDENTITY_RESOURCE_ID:-system}" \
+    "webiq-api-key=keyvaultref:${key_vault_uri}/webiq-api-key,identityref:${FRONTEND_IDENTITY_RESOURCE_ID:-system}" \
     "entra-client-secret=keyvaultref:${key_vault_uri}/entra-client-secret,identityref:${FRONTEND_IDENTITY_RESOURCE_ID:-system}" \
   --output none
 
@@ -246,9 +249,11 @@ az containerapp update \
   --name "${SERVICE_FRONTEND_NAME}" \
   --resource-group "${AZURE_RESOURCE_GROUP}" \
   --container-name frontend \
-  --set-env-vars 'VLLM_API_KEY=secretref:vllm-api-key' 'MODEL_HEALTH_TOKEN=secretref:model-health-token' \
+  --set-env-vars 'VLLM_API_KEY=secretref:vllm-api-key' 'MODEL_HEALTH_TOKEN=secretref:model-health-token' 'WEBIQ_API_KEY=secretref:webiq-api-key' \
   --output none
 
 azd env set APERTUS_IMAGE_TAG '' >/dev/null
 azd env set ROTATE_APPLICATION_SECRETS false >/dev/null
+azd env set ROTATE_WEBIQ_SECRET false >/dev/null
+azd env set ROTATE_VLLM_SECRET false >/dev/null
 echo 'Inference image promoted and frontend secrets configured successfully.'
