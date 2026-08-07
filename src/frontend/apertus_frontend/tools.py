@@ -42,7 +42,6 @@ class ToolResult:
     content: str
     citations: tuple[ToolCitation, ...] = ()
     grounding_sources: tuple[str, ...] = ()
-    grounding_fallback_answer: str = ""
 
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[ToolResult]]
@@ -276,5 +275,5 @@ def search_web_spec(handler: ToolHandler) -> ToolSpec:
             "additionalProperties": False,
         },
         handler=handler,
-        timeout_seconds=30.0,
+        timeout_seconds=120.0,
     )

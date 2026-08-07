@@ -131,14 +131,6 @@ if ! grep -q 'auth microsoft update' "${success_log}"; then
   echo 'Microsoft Entra authentication was not configured.' >&2
   exit 1
 fi
-if ! grep -q 'webiq-api-key=keyvaultref:' "${success_log}"; then
-  echo 'Web IQ Key Vault reference was not configured on the frontend.' >&2
-  exit 1
-fi
-if ! grep -q 'WEBIQ_API_KEY=secretref:webiq-api-key' "${success_log}"; then
-  echo 'Web IQ secret environment variable was not configured on the frontend.' >&2
-  exit 1
-fi
 if grep -q 'ingress enable' "${success_log}"; then
   echo 'Public ingress was enabled before the real frontend image deployment.' >&2
   exit 1

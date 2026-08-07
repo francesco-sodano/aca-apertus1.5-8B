@@ -1,6 +1,8 @@
 .azure/
 .ruff_cache/
-/.chainlit/
+docs/architecture.md
+docs/operations.md
+docs/security-and-grounding.md
 
 infra/main.json
 

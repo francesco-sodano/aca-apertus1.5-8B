@@ -6,6 +6,8 @@ var privateDnsZoneNames = [
   'privatelink.azurecr.io'
   'privatelink.cognitiveservices.azure.com'
   'privatelink.file.${environment().suffixes.storage}'
+  'privatelink.openai.azure.com'
+  'privatelink.services.ai.azure.com'
   'privatelink.vaultcore.azure.net'
 ]
 
@@ -70,6 +72,8 @@ output privateDnsZoneResourceIds object = {
   acr: privateDnsZones[0].id
   cognitiveServices: privateDnsZones[1].id
   storageFile: privateDnsZones[2].id
-  keyVault: privateDnsZones[3].id
+  openAI: privateDnsZones[3].id
+  aiServices: privateDnsZones[4].id
+  keyVault: privateDnsZones[5].id
 }
 output resourceId string = virtualNetwork.id

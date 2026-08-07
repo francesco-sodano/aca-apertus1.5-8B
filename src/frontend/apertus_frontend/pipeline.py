@@ -144,7 +144,6 @@ class Citation:
 class GroundingPacket:
     summary: str
     citations: tuple[Citation, ...] = ()
-    fallback_answer: str = ""
 
     @property
     def valid_citations(self) -> tuple[Citation, ...]:
@@ -174,7 +173,6 @@ class ModelCompletion:
     answer: str
     citations: tuple[Citation, ...] = ()
     grounding_sources: tuple[str, ...] = ()
-    grounding_fallback_answer: str = ""
     selected_tools: tuple[str, ...] = ()
 
 
@@ -258,7 +256,12 @@ class GroundedCompletionService:
 
         async def search_web(arguments: dict[str, object]) -> ToolResult:
             objective = str(arguments["query"]).strip()
-            return await self._search_web({"query": objective})
+            search_query = (
+                f"Search objective selected by Apertus: {objective}\n"
+                f"LATEST USER REQUEST: {request.text.strip()[:1000]}\n"
+                f"Conversation context for reference resolution only: {query[:2000]}"
+            )
+            return await self._search_web({"query": search_query})
 
         tool_registry = ToolRegistry(
             (
@@ -329,7 +332,6 @@ class GroundedCompletionService:
         grounding = GroundingPacket(
             summary="\n\n".join(completion.grounding_sources),
             citations=citations,
-            fallback_answer=completion.grounding_fallback_answer,
         )
         selected_tools = completion.selected_tools
         grounded, grounding_sources = await self._validate_completion(
@@ -360,14 +362,14 @@ class GroundedCompletionService:
             if retry_grounded is True:
                 completion = retry_completion
                 grounded = True
-            elif grounding.fallback_answer.strip() and citations:
+            elif grounding.summary.strip() and citations:
                 await _report_progress(
                     on_progress, ProgressStage.USING_SEARCH_SUMMARY
                 )
                 await self._safety.screen_text(
-                    grounding.fallback_answer, purpose="model-output"
+                    grounding.summary, purpose="model-output"
                 )
-                completion = ModelCompletion(answer=grounding.fallback_answer)
+                completion = ModelCompletion(answer=grounding.summary)
                 grounded = retry_grounded
                 groundedness_fallback_used = True
                 logger.warning(
@@ -416,7 +418,6 @@ class GroundedCompletionService:
                 for citation in packet.valid_citations
             ),
             grounding_sources=(packet.summary,),
-            grounding_fallback_answer=packet.fallback_answer,
         )
 
     async def _validate_completion(

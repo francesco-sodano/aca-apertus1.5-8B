@@ -17,6 +17,7 @@ args=(
   serve "${model_id}"
   --host 0.0.0.0
   --port 8000
+  --api-key "${VLLM_API_KEY}"
   --chat-template-content-format string
   --gpu-memory-utilization "${gpu_memory_utilization}"
   --max-model-len "${max_model_len}"

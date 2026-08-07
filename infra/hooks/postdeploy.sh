@@ -20,25 +20,14 @@ if [[ -z "${SERVICE_FRONTEND_NAME:-}" || -z "${AZURE_RESOURCE_GROUP:-}" ]]; then
 fi
 
 # The real frontend image and Entra provider are ready, so external ingress can open.
-ingress_enabled='false'
-for attempt in $(seq 1 10); do
-  if az containerapp ingress enable \
-    --name "${SERVICE_FRONTEND_NAME}" \
-    --resource-group "${AZURE_RESOURCE_GROUP}" \
-    --type external \
-    --allow-insecure false \
-    --target-port 8000 \
-    --transport auto \
-    --output none; then
-    ingress_enabled='true'
-    break
-  fi
-  if [[ "${attempt}" != '10' ]]; then
-    printf 'Container Apps operation is still settling (%s/10); retrying ingress.\n' "${attempt}"
-    sleep 15
-  fi
-done
-if [[ "${ingress_enabled}" != 'true' ]]; then
+if ! az containerapp ingress enable \
+  --name "${SERVICE_FRONTEND_NAME}" \
+  --resource-group "${AZURE_RESOURCE_GROUP}" \
+  --type external \
+  --allow-insecure false \
+  --target-port 8000 \
+  --transport auto \
+  --output none; then
   echo 'Failed to enable authenticated frontend ingress.' >&2
   exit 1
 fi
@@ -53,19 +42,11 @@ health_token="${MODEL_HEALTH_TOKEN}"
 # Prewarm is best effort: scale-to-zero remains valid when the model is cold.
 echo 'Prewarming the inference replica. The first model load can take 10-15 minutes.'
 for attempt in $(seq 1 40); do
-  http_status="$(curl --silent --show-error --max-time 35 \
-    --output /dev/null \
-    --write-out '%{http_code}' \
+  if curl --fail --silent --show-error --max-time 35 \
     --header "Authorization: Bearer ${health_token}" \
-    "${SERVICE_FRONTEND_URI}/healthz/model" 2>/dev/null || true)"
-  if [[ "${http_status}" == '200' ]]; then
+    "${SERVICE_FRONTEND_URI}/healthz/model" >/dev/null 2>&1; then
     azd env set MODEL_HEALTH_TOKEN '' >/dev/null
     echo 'Model is warm and serving.'
-    exit 0
-  fi
-  if [[ "${http_status}" == '401' ]]; then
-    azd env set MODEL_HEALTH_TOKEN '' >/dev/null
-    echo 'Local model health token is stale; cleared it and skipped prewarm.' >&2
     exit 0
   fi
   printf 'Model is still loading (%s/40).\n' "${attempt}"

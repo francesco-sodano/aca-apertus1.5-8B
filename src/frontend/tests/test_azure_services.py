@@ -4,9 +4,12 @@ import pytest
 
 from apertus_frontend.azure_services import (
     AzureContentSafetyGateway,
+    FoundryWebSearchGateway,
     _blocked_category,
+    _extract_foundry_result,
 )
 from apertus_frontend.pipeline import (
+    Citation,
     SafetyBlockedError,
 )
 
@@ -27,6 +30,109 @@ class RecordingClient:
             raise_for_status=lambda: None,
             json=lambda: self.payload,
         )
+
+
+def test_extracts_foundry_text_and_unique_citations():
+    payload = {
+        "output": [
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Grounded summary",
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "title": "Primary source",
+                                "url": "https://example.com/source",
+                            },
+                            {
+                                "type": "url_citation",
+                                "title": "Duplicate",
+                                "url": "https://example.com/source",
+                            },
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    summary, citations = _extract_foundry_result(payload)
+
+    assert summary == "Grounded summary"
+    assert len(citations) == 1
+    assert citations[0].url == "https://example.com/source"
+
+
+def test_extracts_included_web_search_sources_without_inline_annotations():
+    payload = {
+        "output_text": "Evidence without inline annotations",
+        "output": [
+            {
+                "type": "web_search_call",
+                "action": {
+                    "type": "search",
+                    "sources": [
+                        {
+                            "type": "url",
+                            "title": "Primary source",
+                            "url": "https://example.com/primary",
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+
+    summary, citations = _extract_foundry_result(payload)
+
+    assert summary == "Evidence without inline annotations"
+    assert citations == (
+        Citation(title="Primary source", url="https://example.com/primary"),
+    )
+
+
+def test_prefers_inline_citations_and_limits_display_sources():
+    payload = {
+        "output": [
+            {
+                "type": "web_search_call",
+                "action": {
+                    "sources": [
+                        {
+                            "type": "url",
+                            "title": f"Source {index}",
+                            "url": f"https://example.com/{index}",
+                        }
+                        for index in range(10)
+                    ]
+                },
+            },
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Evidence",
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "title": "Cited source",
+                                "url": "https://cited.example.com",
+                            }
+                        ],
+                    }
+                ],
+            },
+        ]
+    }
+
+    _, citations = _extract_foundry_result(payload)
+
+    assert len(citations) == 5
+    assert citations[0].url == "https://cited.example.com"
 
 
 def test_content_safety_threshold_is_inclusive():
@@ -66,3 +172,32 @@ async def test_content_safety_block_preserves_rule_and_severity_for_ui():
         "Your message was blocked by Azure AI Content Safety. "
         "Rule: Violence; severity 4 met the configured block threshold 4."
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "expects_reasoning"),
+    [
+        ("gpt-4.1-nano-grounding", False),
+        ("gpt-5-nano-grounding", True),
+    ],
+)
+async def test_web_search_uses_model_compatible_latency_controls(
+    model, expects_reasoning
+):
+    client = RecordingClient()
+    gateway = FoundryWebSearchGateway(
+        project_endpoint="https://foundry.example/api/projects/test",
+        model=model,
+        credential=FakeCredential(),
+        client=client,
+    )
+
+    await gateway.search("Current information")
+
+    assert ("reasoning" in client.body) is expects_reasoning
+    assert ("text" in client.body) is expects_reasoning
+    assert "shown directly" in client.body["instructions"]
+    assert "requested language" in client.body["instructions"]
+    assert client.body["tools"][0]["search_context_size"] == "low"
+    assert "user_location" not in client.body["tools"][0]

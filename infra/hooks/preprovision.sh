@@ -30,6 +30,22 @@ if [[ ! "${AZURE_ENV_NAME}" =~ ^[a-z0-9][a-z0-9-]{3,22}[a-z0-9]$ ]]; then
   exit 1
 fi
 
+preserve_account_name_from_endpoint() {
+  local name="$1"
+  local endpoint_name="$2"
+  [[ -n "${!name:-}" || -z "${!endpoint_name:-}" ]] && return
+  local host="${!endpoint_name#*://}"
+  host="${host%%/*}"
+  local account_name="${host%%.*}"
+  if [[ -n "${account_name}" ]]; then
+    azd env set "${name}" "${account_name}" >/dev/null
+    printf 'Preserved existing %s value from %s.\n' "${name}" "${endpoint_name}"
+  fi
+}
+
+preserve_account_name_from_endpoint AZURE_FOUNDRY_ACCOUNT_NAME FOUNDRY_PROJECT_ENDPOINT
+preserve_account_name_from_endpoint AZURE_CONTENT_SAFETY_ACCOUNT_NAME CONTENT_SAFETY_ENDPOINT
+
 validate_optional_name() {
   local name="$1"
   local pattern="$2"
@@ -43,6 +59,7 @@ validate_optional_name() {
 validate_optional_name AZURE_CONTAINER_REGISTRY_NAME '^[a-z0-9]{5,50}$' 'Use 5-50 lowercase letters or numbers.'
 validate_optional_name AZURE_STORAGE_ACCOUNT_NAME '^[a-z0-9]{3,24}$' 'Use 3-24 lowercase letters or numbers.'
 validate_optional_name AZURE_KEY_VAULT_NAME '^[a-z][a-z0-9-]{1,22}[a-z0-9]$' 'Use 3-24 lowercase letters, numbers, or hyphens; start with a letter and end with a letter or number.'
+validate_optional_name AZURE_FOUNDRY_ACCOUNT_NAME '^[a-z][a-z0-9-]{0,62}[a-z0-9]$' 'Use 2-64 lowercase letters, numbers, or hyphens; start with a letter and end with a letter or number.'
 validate_optional_name AZURE_CONTENT_SAFETY_ACCOUNT_NAME '^[a-z][a-z0-9-]{0,62}[a-z0-9]$' 'Use 2-64 lowercase letters, numbers, or hyphens; start with a letter and end with a letter or number.'
 validate_optional_name APERTUS_IMAGE_TAG_OVERRIDE '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$' 'Use a valid container tag with at most 128 letters, numbers, periods, underscores, or hyphens.'
 
@@ -57,21 +74,13 @@ if [[ "${APPLICATION_SECRETS_READY:-false}" != 'true' || "${ROTATE_APPLICATION_S
   fi
 fi
 
-if [[ "${ROTATE_VLLM_SECRET:-false}" == 'true' && -z "${VLLM_API_KEY:-}" ]]; then
-  azd env set VLLM_API_KEY "$(openssl rand -hex 32)" >/dev/null
-fi
-
-if [[ "${WEBIQ_SECRET_READY:-false}" != 'true' || "${ROTATE_APPLICATION_SECRETS:-false}" == 'true' || "${ROTATE_WEBIQ_SECRET:-false}" == 'true' ]]; then
-  require_value WEBIQ_API_KEY
-fi
-
 if [[ "${ACCEPT_APERTUS_LICENSE:-false}" != 'true' ]]; then
   echo 'Set ACCEPT_APERTUS_LICENSE=true after accepting the Apertus model terms on Hugging Face.' >&2
   exit 1
 fi
 
-if [[ "${ACCEPT_WEBIQ_TERMS:-false}" != 'true' ]]; then
-  echo 'Set ACCEPT_WEBIQ_TERMS=true after reviewing the Microsoft Web IQ terms for your enabled profile.' >&2
+if [[ "${ACCEPT_BING_GROUNDING_TERMS:-false}" != 'true' ]]; then
+  echo 'Set ACCEPT_BING_GROUNDING_TERMS=true after reviewing the Grounding with Bing data-boundary terms.' >&2
   exit 1
 fi
 

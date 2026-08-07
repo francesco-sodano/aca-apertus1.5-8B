@@ -28,11 +28,9 @@ $acrBuildWindowOpen = $false
 
 # Bootstrap secrets are now in Key Vault; remove source copies from local azd state.
 azd env set APPLICATION_SECRETS_READY true | Out-Null
-azd env set WEBIQ_SECRET_READY true | Out-Null
 azd env set HF_TOKEN '' | Out-Null
 azd env set ENTRA_CLIENT_SECRET '' | Out-Null
 azd env set VLLM_API_KEY '' | Out-Null
-azd env set WEBIQ_API_KEY '' | Out-Null
 
 $acrResourceId = az acr show --name $env:AZURE_CONTAINER_REGISTRY_NAME --query id --output tsv
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($acrResourceId)) {
@@ -150,7 +148,6 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not configure inference secrets.' }
 az containerapp secret set --name $env:SERVICE_FRONTEND_NAME --resource-group $env:AZURE_RESOURCE_GROUP --secrets `
     "vllm-api-key=keyvaultref:${keyVaultUri}/vllm-api-key,identityref:${frontendIdentity}" `
     "model-health-token=keyvaultref:${keyVaultUri}/model-health-token,identityref:${frontendIdentity}" `
-    "webiq-api-key=keyvaultref:${keyVaultUri}/webiq-api-key,identityref:${frontendIdentity}" `
     "entra-client-secret=keyvaultref:${keyVaultUri}/entra-client-secret,identityref:${frontendIdentity}" --output none
 if ($LASTEXITCODE -ne 0) { throw 'Could not configure frontend secrets.' }
 
@@ -187,13 +184,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Inference image promotion failed.' }
 
 az containerapp update --name $env:SERVICE_FRONTEND_NAME --resource-group $env:AZURE_RESOURCE_GROUP `
     --container-name frontend `
-    --set-env-vars 'VLLM_API_KEY=secretref:vllm-api-key' 'MODEL_HEALTH_TOKEN=secretref:model-health-token' 'WEBIQ_API_KEY=secretref:webiq-api-key' --output none
+    --set-env-vars 'VLLM_API_KEY=secretref:vllm-api-key' 'MODEL_HEALTH_TOKEN=secretref:model-health-token' --output none
 if ($LASTEXITCODE -ne 0) { throw 'Frontend secret environment configuration failed.' }
 
     azd env set APERTUS_IMAGE_TAG '' | Out-Null
     azd env set ROTATE_APPLICATION_SECRETS false | Out-Null
-    azd env set ROTATE_WEBIQ_SECRET false | Out-Null
-    azd env set ROTATE_VLLM_SECRET false | Out-Null
     Write-Host 'Inference image promoted and frontend secrets configured successfully.'
 }
 catch {

@@ -7,7 +7,8 @@ param image string
 param keyVaultUri string
 param modelEndpoint string
 param contentSafetyEndpoint string
-param webIqEndpoint string
+param foundryProjectEndpoint string
+param foundryGroundingModel string
 param appInsightsConnectionString string
 param configureApplicationSecrets bool
 param entraClientId string
@@ -65,11 +66,6 @@ resource frontendApp 'Microsoft.App/containerApps@2025-01-01' = {
           keyVaultUrl: '${keyVaultUri}secrets/entra-client-secret'
           name: 'entra-client-secret'
         }
-        {
-          identity: identityResourceId
-          keyVaultUrl: '${keyVaultUri}secrets/webiq-api-key'
-          name: 'webiq-api-key'
-        }
       ] : []
     }
     template: {
@@ -91,8 +87,12 @@ resource frontendApp 'Microsoft.App/containerApps@2025-01-01' = {
               value: contentSafetyEndpoint
             }
             {
-              name: 'WEBIQ_ENDPOINT'
-              value: webIqEndpoint
+              name: 'FOUNDRY_PROJECT_ENDPOINT'
+              value: foundryProjectEndpoint
+            }
+            {
+              name: 'FOUNDRY_GROUNDING_MODEL'
+              value: foundryGroundingModel
             }
             {
               name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
@@ -122,10 +122,6 @@ resource frontendApp 'Microsoft.App/containerApps@2025-01-01' = {
             {
               name: 'MODEL_HEALTH_TOKEN'
               secretRef: 'model-health-token'
-            }
-            {
-              name: 'WEBIQ_API_KEY'
-              secretRef: 'webiq-api-key'
             }
           ] : [])
           probes: [

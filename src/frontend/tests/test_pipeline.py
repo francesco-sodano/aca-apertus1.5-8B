@@ -115,7 +115,6 @@ class FakeModel:
                 Citation(item.title, item.url) for item in result.citations
             ),
             grounding_sources=result.grounding_sources,
-            grounding_fallback_answer=result.grounding_fallback_answer,
             selected_tools=(selected_tool,),
         )
 
@@ -124,7 +123,6 @@ def safe_packet() -> GroundingPacket:
     return GroundingPacket(
         summary="Verified evidence",
         citations=(Citation(title="Source", url="https://example.com/source"),),
-        fallback_answer="Verified evidence",
     )
 
 
@@ -390,7 +388,12 @@ async def test_apertus_selected_web_search_is_brokered_and_cited():
         ChatProfile.TOOLS,
     )
 
-    assert grounding.queries == ["Voyager 1 communications status"]
+    assert grounding.queries == [
+        "Search objective selected by Apertus: Voyager 1 communications status\n"
+        "LATEST USER REQUEST: Has Voyager 1 recovered communications?\n"
+        "Conversation context for reference resolution only: Has Voyager 1 "
+        "recovered communications?"
+    ]
     assert result.selected_tools == ("search_web",)
     assert result.citations == safe_packet().citations
     assert model.calls == 1
@@ -462,7 +465,11 @@ async def test_apertus_search_query_can_preserve_response_requirements():
     )
 
     assert grounding.queries == [
-        "The Odyssey 2026 Christopher Nolan plot in Romansh"
+        "Search objective selected by Apertus: The Odyssey 2026 Christopher "
+        "Nolan plot in Romansh\nLATEST USER REQUEST: give me the plot of The "
+        "Odyssey (2026 film by Christopher Nolan) in Romansh\nConversation "
+        "context for reference resolution only: give me the plot of The Odyssey "
+        "(2026 film by Christopher Nolan) in Romansh"
     ]
 
 

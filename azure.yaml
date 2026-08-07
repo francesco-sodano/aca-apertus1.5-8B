@@ -51,5 +51,3 @@ services:
     docker:
       path: ./Dockerfile
       context: .
-      buildArgs:
-        - PYTHON_PACKAGE_INDEX_URL

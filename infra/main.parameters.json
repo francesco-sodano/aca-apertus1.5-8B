@@ -17,17 +17,8 @@
     "applicationSecretsReady": {
       "value": "${APPLICATION_SECRETS_READY=false}"
     },
-    "webIqSecretReady": {
-      "value": "${WEBIQ_SECRET_READY=false}"
-    },
     "rotateApplicationSecrets": {
       "value": "${ROTATE_APPLICATION_SECRETS=false}"
-    },
-    "rotateWebIqSecret": {
-      "value": "${ROTATE_WEBIQ_SECRET=false}"
-    },
-    "rotateVllmSecret": {
-      "value": "${ROTATE_VLLM_SECRET=false}"
     },
     "entraClientId": {
       "value": "${ENTRA_CLIENT_ID}"
@@ -41,9 +32,6 @@
     "monthlyBudgetAmount": {
       "value": "${MONTHLY_BUDGET_AMOUNT=500}"
     },
-    "budgetStartDate": {
-      "value": "${BUDGET_START_DATE=}"
-    },
     "containerRegistryName": {
       "value": "${AZURE_CONTAINER_REGISTRY_NAME=}"
     },
@@ -52,6 +40,9 @@
     },
     "keyVaultName": {
       "value": "${AZURE_KEY_VAULT_NAME=}"
+    },
+    "foundryAccountName": {
+      "value": "${AZURE_FOUNDRY_ACCOUNT_NAME=}"
     },
     "contentSafetyAccountName": {
       "value": "${AZURE_CONTENT_SAFETY_ACCOUNT_NAME=}"
@@ -67,9 +58,6 @@
     },
     "entraClientSecret": {
       "value": "${ENTRA_CLIENT_SECRET}"
-    },
-    "webIqApiKey": {
-      "value": "${WEBIQ_API_KEY=}"
     }
   }
 }

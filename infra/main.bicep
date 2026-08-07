@@ -17,17 +17,8 @@ param modelRevision string
 @description('Set by the deployment hook after Key Vault application secrets exist.')
 param applicationSecretsReady bool = false
 
-@description('Set by the deployment hook after the Microsoft Web IQ API key exists in Key Vault.')
-param webIqSecretReady bool = false
-
 @description('Replace all application secrets through secure ARM parameters during this deployment.')
 param rotateApplicationSecrets bool = false
-
-@description('Replace only the Microsoft Web IQ API key during this deployment.')
-param rotateWebIqSecret bool = false
-
-@description('Replace only the internal vLLM API key during this deployment.')
-param rotateVllmSecret bool = false
 
 @minLength(36)
 @description('Application (client) ID of the existing single-tenant Entra app registration used by Container Apps Easy Auth.')
@@ -45,11 +36,9 @@ param alertEmail string
 @description('Monthly resource-group budget in the subscription billing currency.')
 param monthlyBudgetAmount int = 500
 
-@description('Existing immutable budget start date. Leave empty only for first creation.')
-param budgetStartDate string = ''
-
-@description('First day of the deployment month used only when creating a new budget.')
-param deploymentMonthStart string = utcNow('yyyy-MM-01T00:00:00Z')
+@minValue(1)
+@description('Global Standard capacity for the Foundry grounding model deployment.')
+param groundingModelCapacity int = 10
 
 @description('Tags applied to all resources.')
 param tags object = {}
@@ -65,6 +54,10 @@ param storageAccountName string = ''
 @maxLength(24)
 @description('Optional globally unique Key Vault name. Leave empty to derive one from the deployment scope.')
 param keyVaultName string = ''
+
+@maxLength(64)
+@description('Optional globally unique Microsoft Foundry account and custom subdomain name. Leave empty to derive one from the deployment scope.')
+param foundryAccountName string = ''
 
 @maxLength(64)
 @description('Optional globally unique Azure AI Content Safety account and custom subdomain name. Leave empty to derive one from the deployment scope.')
@@ -86,30 +79,29 @@ param modelHealthToken string = ''
 @description('Client secret for the existing single-tenant frontend Entra application.')
 param entraClientSecret string = ''
 
-@secure()
-@description('Microsoft Web IQ API key used for direct public-web passage retrieval.')
-param webIqApiKey string = ''
-
 var uniqueSuffix = uniqueString(subscription().subscriptionId, resourceGroup().id, environmentName)
 var compactSuffix = take(uniqueSuffix, 8)
 var globalEnvironmentName = take(toLower(replace(environmentName, '-', '')), 7)
 var resolvedContainerRegistryName = empty(containerRegistryName) ? 'cr${globalEnvironmentName}${uniqueSuffix}' : containerRegistryName
 var resolvedStorageAccountName = empty(storageAccountName) ? 'st${globalEnvironmentName}${uniqueSuffix}' : storageAccountName
 var resolvedKeyVaultName = empty(keyVaultName) ? 'kv-${globalEnvironmentName}-${uniqueSuffix}' : keyVaultName
+var resolvedFoundryAccountName = empty(foundryAccountName) ? 'fdry-${globalEnvironmentName}-${uniqueSuffix}' : foundryAccountName
 var resolvedContentSafetyAccountName = empty(contentSafetyAccountName) ? 'cs-${globalEnvironmentName}-${uniqueSuffix}' : contentSafetyAccountName
-var resolvedBudgetStartDate = empty(budgetStartDate) ? deploymentMonthStart : budgetStartDate
 
 var logAnalyticsName = take('log-${environmentName}', 63)
 var appInsightsName = take('appi-${environmentName}', 260)
 var frontendIdentityName = take('id-${environmentName}-frontend', 128)
 var inferenceIdentityName = take('id-${environmentName}-inference', 128)
+var foundryProjectName = take('proj-${environmentName}-grounding', 64)
 var managedEnvironmentName = take('cae-${environmentName}', 32)
 var frontendAppName = take('ca-${environmentName}-frontend', 32)
 var inferenceAppName = take('ca-${environmentName}-inference', 32)
 var virtualNetworkName = take('vnet-${environmentName}', 64)
 var modelShareName = 'model-cache'
 var modelStorageName = 'model-cache'
-var webIqEndpoint = 'https://api.microsoft.ai/v3/search/web'
+var groundingDeploymentName = 'gpt-4.1-nano-grounding'
+var groundingModelName = 'gpt-4.1-nano'
+var groundingModelVersion = '2025-04-14'
 var bootstrapImage = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest@sha256:e9b3e7c34664c7cffd7144864b0e4eec369bfde80068f9095dc63b37058bec48'
 
 var commonTags = union(tags, {
@@ -253,39 +245,28 @@ module keyVault 'br/public:avm/res/key-vault/vault:0.14.0' = {
         workspaceResourceId: logAnalytics.outputs.resourceId
       }
     ]
-    secrets: concat(
-      applicationSecretsReady && !rotateApplicationSecrets ? [] : [
-        {
-          contentType: 'Hugging Face read token'
-          name: 'hugging-face-token'
-          value: huggingFaceToken
-        }
-        {
-          contentType: 'Model health endpoint token'
-          name: 'model-health-token'
-          value: modelHealthToken
-        }
-        {
-          contentType: 'Container Apps Easy Auth client secret'
-          name: 'entra-client-secret'
-          value: entraClientSecret
-        }
-      ],
-      applicationSecretsReady && !rotateApplicationSecrets && !rotateVllmSecret ? [] : [
-        {
-          contentType: 'Internal vLLM API key'
-          name: 'vllm-api-key'
-          value: vllmApiKey
-        }
-      ],
-      webIqSecretReady && !rotateApplicationSecrets && !rotateWebIqSecret ? [] : [
-        {
-          contentType: 'Microsoft Web IQ API key'
-          name: 'webiq-api-key'
-          value: webIqApiKey
-        }
-      ]
-    )
+    secrets: applicationSecretsReady && !rotateApplicationSecrets ? [] : [
+      {
+        contentType: 'Hugging Face read token'
+        name: 'hugging-face-token'
+        value: huggingFaceToken
+      }
+      {
+        contentType: 'Internal vLLM API key'
+        name: 'vllm-api-key'
+        value: vllmApiKey
+      }
+      {
+        contentType: 'Model health endpoint token'
+        name: 'model-health-token'
+        value: modelHealthToken
+      }
+      {
+        contentType: 'Container Apps Easy Auth client secret'
+        name: 'entra-client-secret'
+        value: entraClientSecret
+      }
+    ]
     tags: commonTags
   }
 }
@@ -354,6 +335,113 @@ module storagePrivateEndpoint './modules/network/private-endpoint.bicep' = {
     subnetResourceId: privateNetwork.outputs.privateEndpointSubnetResourceId
     targetResourceId: storage.outputs.resourceId
     tags: commonTags
+  }
+}
+
+module aiServices 'br/public:avm/res/cognitive-services/account:0.17.0' = {
+  name: 'foundry-account'
+  params: {
+    kind: 'AIServices'
+    name: resolvedFoundryAccountName
+    location: location
+    allowProjectManagement: true
+    customSubDomainName: resolvedFoundryAccountName
+    disableLocalAuth: true
+    publicNetworkAccess: 'Disabled'
+    restrictOutboundNetworkAccess: false
+    deployments: [
+      {
+        model: {
+          format: 'OpenAI'
+          name: groundingModelName
+          version: groundingModelVersion
+        }
+        name: groundingDeploymentName
+        sku: {
+          capacity: groundingModelCapacity
+          name: 'GlobalStandard'
+        }
+        versionUpgradeOption: 'NoAutoUpgrade'
+      }
+    ]
+    roleAssignments: [
+    ]
+    diagnosticSettings: [
+      {
+        workspaceResourceId: logAnalytics.outputs.resourceId
+      }
+    ]
+    tags: commonTags
+  }
+}
+
+module aiServicesPrivateEndpoint './modules/network/private-endpoint.bicep' = {
+  name: 'foundry-private-endpoint'
+  params: {
+    location: location
+    name: take('pep-${environmentName}-foundry', 80)
+    privateDnsZoneResourceIds: [
+      privateNetwork.outputs.privateDnsZoneResourceIds.cognitiveServices
+      privateNetwork.outputs.privateDnsZoneResourceIds.openAI
+      privateNetwork.outputs.privateDnsZoneResourceIds.aiServices
+    ]
+    service: 'account'
+    subnetResourceId: privateNetwork.outputs.privateEndpointSubnetResourceId
+    targetResourceId: aiServices.outputs.resourceId
+    tags: commonTags
+  }
+}
+
+resource foundryAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' existing = {
+  name: resolvedFoundryAccountName
+}
+
+resource foundryProject 'Microsoft.CognitiveServices/accounts/projects@2025-06-01' = {
+  parent: foundryAccount
+  name: foundryProjectName
+  location: location
+  identity: {
+    type: 'SystemAssigned'
+  }
+  properties: {
+    description: 'Mandatory Bing-backed grounding for Apertus requests.'
+    displayName: 'Apertus grounding'
+  }
+  dependsOn: [
+    aiServices
+  ]
+}
+
+resource foundryProjectUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(foundryAccount.id, foundryProject.id, 'Foundry User')
+  scope: foundryAccount
+  properties: {
+    principalId: foundryProject.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId(
+      'Microsoft.Authorization/roleDefinitions',
+      '53ca6127-db72-4b80-b1b0-d745d6d5456d'
+    )
+  }
+}
+
+resource foundryProjectDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: 'apertus-project-diagnostics'
+  scope: foundryProject
+  properties: {
+    logs: [
+      {
+        categoryGroup: 'allLogs'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'AllMetrics'
+        enabled: true
+      }
+    ]
+    workspaceId: logAnalytics.outputs.resourceId
   }
 }
 
@@ -475,7 +563,8 @@ module frontendApp './modules/app/frontend-container-app.bicep' = {
     keyVaultUri: keyVault.outputs.uri
     modelEndpoint: 'https://${inferenceApp.outputs.fqdn}/v1'
     contentSafetyEndpoint: contentSafety.outputs.endpoint
-    webIqEndpoint: webIqEndpoint
+    foundryProjectEndpoint: 'https://${resolvedFoundryAccountName}.services.ai.azure.com/api/projects/${foundryProjectName}'
+    foundryGroundingModel: groundingDeploymentName
     appInsightsConnectionString: applicationInsights.outputs.connectionString
     configureApplicationSecrets: applicationSecretsReady
     entraClientId: entraClientId
@@ -486,6 +575,19 @@ module frontendApp './modules/app/frontend-container-app.bicep' = {
 
 resource contentSafetyAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' existing = {
   name: resolvedContentSafetyAccountName
+}
+
+resource frontendFoundryUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(foundryAccount.id, frontendAppName, 'Foundry User')
+  scope: foundryAccount
+  properties: {
+    principalId: frontendApp.outputs.systemAssignedPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId(
+      'Microsoft.Authorization/roleDefinitions',
+      '53ca6127-db72-4b80-b1b0-d745d6d5456d'
+    )
+  }
 }
 
 resource frontendContentSafetyUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
@@ -528,7 +630,6 @@ module monthlyBudget 'br/public:avm/res/consumption/budget/rg-scope:0.1.0' = {
     contactEmails: [
       alertEmail
     ]
-    startDate: resolvedBudgetStartDate
     thresholds: [
       70
       90
@@ -608,8 +709,8 @@ output AZURE_CONTAINER_REGISTRY_NAME string = registry.outputs.name
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = registry.outputs.loginServer
 output AZURE_KEY_VAULT_NAME string = keyVault.outputs.name
 output AZURE_STORAGE_ACCOUNT_NAME string = storage.outputs.name
+output AZURE_FOUNDRY_ACCOUNT_NAME string = resolvedFoundryAccountName
 output AZURE_CONTENT_SAFETY_ACCOUNT_NAME string = resolvedContentSafetyAccountName
-output BUDGET_START_DATE string = resolvedBudgetStartDate
 output AZURE_CONTAINER_APPS_ENVIRONMENT_NAME string = managedEnvironment.outputs.name
 output FRONTEND_IDENTITY_RESOURCE_ID string = frontendIdentity.outputs.resourceId
 output FRONTEND_IDENTITY_PRINCIPAL_ID string = frontendIdentity.outputs.principalId
@@ -619,5 +720,6 @@ output SERVICE_FRONTEND_NAME string = frontendApp.outputs.name
 output SERVICE_FRONTEND_URI string = 'https://${frontendApp.outputs.fqdn}'
 output SERVICE_INFERENCE_NAME string = inferenceApp.outputs.name
 output SERVICE_INFERENCE_FQDN string = inferenceApp.outputs.fqdn
+output FOUNDRY_PROJECT_ENDPOINT string = 'https://${resolvedFoundryAccountName}.services.ai.azure.com/api/projects/${foundryProjectName}'
 output CONTENT_SAFETY_ENDPOINT string = contentSafety.outputs.endpoint
 output APPLICATIONINSIGHTS_CONNECTION_STRING string = applicationInsights.outputs.connectionString

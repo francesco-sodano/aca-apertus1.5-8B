@@ -6,8 +6,6 @@ LABEL org.opencontainers.image.source="https://github.com/francesco-sodano/aca-a
 LABEL org.opencontainers.image.description="Grounded Chainlit frontend for Apertus 1.5"
 LABEL org.opencontainers.image.licenses="MIT"
 
-ARG PYTHON_PACKAGE_INDEX_URL=https://pypi.org/simple
-
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
@@ -22,8 +20,7 @@ RUN groupadd --system --gid 10001 appuser \
 WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md LICENSE ./
-RUN UV_DEFAULT_INDEX="${PYTHON_PACKAGE_INDEX_URL}" uv lock --refresh \
-  && UV_DEFAULT_INDEX="${PYTHON_PACKAGE_INDEX_URL}" uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project
 
 COPY --chown=appuser:appuser .chainlit/config.toml ./.chainlit/config.toml
 COPY --chown=appuser:appuser public ./public

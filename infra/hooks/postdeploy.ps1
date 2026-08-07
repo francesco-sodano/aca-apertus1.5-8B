@@ -16,20 +16,9 @@ if ([string]::IsNullOrWhiteSpace($env:SERVICE_FRONTEND_NAME) -or
 }
 
 # The real frontend image and Entra provider are ready, so external ingress can open.
-$ingressEnabled = $false
-for ($attempt = 1; $attempt -le 10; $attempt++) {
-    az containerapp ingress enable --name $env:SERVICE_FRONTEND_NAME --resource-group $env:AZURE_RESOURCE_GROUP `
-        --type external --allow-insecure false --target-port 8000 --transport auto --output none
-    if ($LASTEXITCODE -eq 0) {
-        $ingressEnabled = $true
-        break
-    }
-    if ($attempt -lt 10) {
-        Write-Host "Container Apps operation is still settling ($attempt/10); retrying ingress."
-        Start-Sleep -Seconds 15
-    }
-}
-if (-not $ingressEnabled) { throw 'Failed to enable authenticated frontend ingress.' }
+az containerapp ingress enable --name $env:SERVICE_FRONTEND_NAME --resource-group $env:AZURE_RESOURCE_GROUP `
+    --type external --allow-insecure false --target-port 8000 --transport auto --output none
+if ($LASTEXITCODE -ne 0) { throw 'Failed to enable authenticated frontend ingress.' }
 
 if ([string]::IsNullOrWhiteSpace($env:SERVICE_FRONTEND_URI) -or
     [string]::IsNullOrWhiteSpace($env:MODEL_HEALTH_TOKEN)) {
@@ -50,11 +39,6 @@ for ($attempt = 1; $attempt -le 40; $attempt++) {
         exit 0
     }
     catch {
-        if ([int]$_.Exception.Response.StatusCode -eq 401) {
-            azd env set MODEL_HEALTH_TOKEN '' | Out-Null
-            Write-Warning 'Local model health token is stale; cleared it and skipped prewarm.'
-            exit 0
-        }
         Write-Host "Model is still loading ($attempt/40)."
         Start-Sleep -Seconds 30
     }
