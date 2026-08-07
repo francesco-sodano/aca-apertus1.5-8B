@@ -14,6 +14,7 @@ from .pipeline import (
     Attachment,
     Citation,
     GroundingPacket,
+    SafetyAssessment,
     SafetyBlockedError,
 )
 from .resilience import (
@@ -54,9 +55,11 @@ class AzureContentSafetyGateway:
         self._retry_policy = retry_policy
         self._circuit_breaker = AsyncCircuitBreaker()
 
-    async def screen_text(self, text: str, *, purpose: str) -> None:
+    async def screen_text(
+        self, text: str, *, purpose: str
+    ) -> SafetyAssessment | None:
         if not text.strip():
-            return
+            return None
         if purpose == "user-input":
             shield = await self._post(
                 "/contentsafety/text:shieldPrompt",
@@ -75,9 +78,9 @@ class AzureContentSafetyGateway:
             {"text": text, "outputType": "EightSeverityLevels"},
             CONTENT_SAFETY_API_VERSION,
         )
-        blocked = _blocked_category_details(result, self._threshold)
-        if blocked:
-            category, severity = blocked
+        assessment = _highest_category_details(result)
+        if assessment and assessment[1] >= self._threshold:
+            category, severity = assessment
             raise SafetyBlockedError(
                 f"{purpose}: {category} severity {severity}",
                 stage=purpose,
@@ -85,6 +88,13 @@ class AzureContentSafetyGateway:
                 severity=severity,
                 threshold=self._threshold,
             )
+        if assessment and assessment[1] > 0:
+            return SafetyAssessment(
+                category=assessment[0],
+                severity=assessment[1],
+                threshold=self._threshold,
+            )
+        return None
 
     async def screen_image(self, attachment: Attachment) -> None:
         result = await self._post(
@@ -246,6 +256,16 @@ class FoundryWebSearchGateway:
         )
         summary, citations = _extract_foundry_result(payload)
         summary = summary[:MAX_GROUNDING_SUMMARY_CHARACTERS].strip()
+        web_search_calls = [
+            item
+            for item in payload.get("output", [])
+            if isinstance(item, dict) and item.get("type") == "web_search_call"
+        ]
+        search_action_count = sum(
+            1
+            for item in web_search_calls
+            if (item.get("action") or {}).get("type") == "search"
+        )
         logger.info(
             "web_search_completed",
             extra={
@@ -253,6 +273,8 @@ class FoundryWebSearchGateway:
                     "client_request_id": client_request_id,
                     "response_id": str(payload.get("id") or ""),
                     **support_ids,
+                    "web_search_call_count": len(web_search_calls),
+                    "search_action_count": search_action_count,
                     "citation_count": len(citations),
                     "duration_ms": round((time.perf_counter() - started) * 1000),
                     "summary_characters": len(summary),
@@ -278,11 +300,20 @@ def _blocked_category_details(
     payload: dict[str, Any], threshold: int
 ) -> tuple[str, int] | None:
     """Return the first Content Safety category at or above the block threshold."""
-    for item in payload.get("categoriesAnalysis") or []:
-        severity = int(item.get("severity") or 0)
-        if severity >= threshold:
-            return str(item.get("category") or "Unknown"), severity
-    return None
+    assessment = _highest_category_details(payload)
+    if assessment is None or assessment[1] < threshold:
+        return None
+    return assessment
+
+
+def _highest_category_details(
+    payload: dict[str, Any],
+) -> tuple[str, int] | None:
+    assessments = [
+        (str(item.get("category") or "Unknown"), int(item.get("severity") or 0))
+        for item in payload.get("categoriesAnalysis") or []
+    ]
+    return max(assessments, key=lambda item: item[1], default=None)
 
 
 def _extract_foundry_result(

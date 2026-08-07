@@ -205,7 +205,7 @@ and applies least privilege, defense in depth, and private connectivity.
 | Safety boundary | Input, image, evidence, and output checks run before content reaches the browser. Prompt Shield protects retrieved evidence from indirect prompt injection. Unsafe content remains a hard block. |
 | Tool and grounding boundary | Apertus selects among allowlisted schemas. The broker validates arguments, limits execution, safety-screens outputs, preserves citations, and rejects unknown tools or uncited fallback evidence. |
 | Secret handling | Sensitive bootstrap values enter as secure ARM parameters, are stored in Key Vault, and are cleared from the local azd environment after initialization. |
-| Observability privacy | Structured telemetry records stage, duration, result, category, application correlation IDs, and sanitized Foundry/APIM support request IDs, but not raw prompts, attachments, evidence, answers, tokens, or secrets. |
+| Observability privacy | Structured telemetry records stage, duration, result, category, application correlation IDs, sanitized Foundry/APIM support request IDs, and Web Search action counts for cost analysis, but not raw prompts, attachments, evidence, answers, tokens, search queries, or secrets. |
 
 Raw audio is the explicit safety exception: MIME type and size are validated,
 but Azure AI Content Safety does not inspect its spoken content in this design.

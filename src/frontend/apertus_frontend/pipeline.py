@@ -62,6 +62,18 @@ _LOCAL_TASK_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _YEAR_PATTERN = re.compile(r"\b(20\d{2})\b")
+_MODEL_REFUSAL_PATTERN = re.compile(
+    r"^\s*(?:i\s+(?:cannot|can't|won't|will not|am unable to)|"
+    r"(?:i(?:'m| am)\s+)?sorry[,;:]?\s+(?:but\s+)?i\s+"
+    r"(?:cannot|can't|won't|will not|am unable to))\b",
+    re.IGNORECASE,
+)
+_ACTIONABLE_HARM_PATTERN = re.compile(
+    r"\b(?:molotov|bomb|explosive|incendiary|weapon|firearm|poison|"
+    r"kill|murder|attack|self[- ]?harm|suicide|malware|ransomware|"
+    r"phishing|steal credentials)\b",
+    re.IGNORECASE,
+)
 
 
 class ChatProfile(StrEnum):
@@ -115,8 +127,17 @@ class SafetyBlockedError(RuntimeError):
         return f"{subject} was blocked by Azure AI Content Safety. {details}"
 
 
+@dataclass(frozen=True)
+class SafetyAssessment:
+    category: str
+    severity: int
+    threshold: int
+
+
 class GroundingUnavailableError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, source: str) -> None:
+        super().__init__(message)
+        self.source = source
 
 
 @dataclass(frozen=True)
@@ -185,7 +206,9 @@ class CompletionResult:
 
 
 class SafetyGateway(Protocol):
-    async def screen_text(self, text: str, *, purpose: str) -> None: ...
+    async def screen_text(
+        self, text: str, *, purpose: str
+    ) -> SafetyAssessment | None: ...
 
     async def screen_image(self, attachment: Attachment) -> None: ...
 
@@ -243,8 +266,11 @@ class GroundedCompletionService:
         self._validate_request(request)
 
         await _report_progress(on_progress, ProgressStage.CHECKING_INPUT)
+        input_safety_assessment = None
         if request.text.strip():
-            await self._safety.screen_text(request.text, purpose="user-input")
+            input_safety_assessment = await self._safety.screen_text(
+                request.text, purpose="user-input"
+            )
 
         for attachment in request.attachments:
             if attachment.is_image:
@@ -383,8 +409,23 @@ class GroundedCompletionService:
                 )
             else:
                 raise GroundingUnavailableError(
-                    "The generated answer did not receive an explicit groundedness approval."
+                    "The generated answer did not receive an explicit groundedness approval.",
+                    source="Azure AI Content Safety Groundedness Detection",
                 )
+
+        model_refusal_explained = False
+        if (
+            not groundedness_fallback_used
+            and _looks_like_model_refusal(completion.answer)
+        ):
+            completion = ModelCompletion(
+                answer=_explain_model_refusal(
+                    request=request,
+                    answer=completion.answer,
+                    assessment=input_safety_assessment,
+                )
+            )
+            model_refusal_explained = True
 
         logger.info(
             "completion_allowed",
@@ -397,6 +438,7 @@ class GroundedCompletionService:
                     "selected_tools": ",".join(selected_tools),
                     "groundedness_checked": grounded is not None,
                     "groundedness_fallback_used": groundedness_fallback_used,
+                    "model_refusal_explained": model_refusal_explained,
                     "duration_ms": round((time.perf_counter() - started) * 1000),
                 }
             },
@@ -448,7 +490,8 @@ class GroundedCompletionService:
         packet = await self._grounding.search(query)
         if not packet.summary.strip():
             raise GroundingUnavailableError(
-                "Web Search returned no evidence; Apertus was not called."
+                "Web Search returned no evidence; Apertus was not called.",
+                source="Microsoft Foundry Web Search",
             )
         await self._safety.screen_grounding(query, packet)
         return packet
@@ -528,6 +571,48 @@ def grounding_query(request: ChatRequest) -> str:
     return (
         "Use the recent conversation only to resolve references in the current "
         f"request.\n{history}\nCurrent user request: {current}"
+    )
+
+
+def _looks_like_model_refusal(answer: str) -> bool:
+    return bool(_MODEL_REFUSAL_PATTERN.search(answer[:500]))
+
+
+def _explain_model_refusal(
+    *,
+    request: ChatRequest,
+    answer: str,
+    assessment: SafetyAssessment | None,
+) -> str:
+    if assessment is not None:
+        reason = (
+            f"Azure AI Content Safety associated the request with the "
+            f"**{assessment.category}** category at severity "
+            f"**{assessment.severity}**. That was below the configured block "
+            f"threshold of **{assessment.threshold}**, so Azure did not block "
+            "the request; Apertus still declined it under its built-in model "
+            "safety behavior."
+        )
+    elif _ACTIONABLE_HARM_PATTERN.search(request.text):
+        reason = (
+            "The request asks for actionable instructions that could facilitate "
+            "violence, physical harm, or another abusive action. Azure AI Content "
+            "Safety did not issue this block; Apertus declined it under its "
+            "built-in model safety behavior."
+        )
+    else:
+        reason = (
+            "Apertus declined the request under its built-in model safety "
+            "behavior. The self-hosted model did not return a machine-readable "
+            "policy category for this refusal."
+        )
+    return (
+        f"{answer.strip()}\n\n"
+        "**Why this was refused**\n"
+        "- **Decision source:** Apertus model safety behavior, not an Azure AI "
+        "Content Safety block.\n"
+        f"- **Reason:** {reason}\n"
+        f"- **Reference:** `{request.correlation_id}`"
     )
 
 

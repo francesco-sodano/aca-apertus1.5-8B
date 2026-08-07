@@ -314,7 +314,7 @@ async def on_message(message: cl.Message) -> None:
         )
         await activity.remove()
         await cl.Message(
-            content="I could not produce a sufficiently grounded answer for this request."
+            content=_grounding_error_message(exc, request.correlation_id)
         ).send()
         return
     except Exception:
@@ -331,6 +331,16 @@ async def on_message(message: cl.Message) -> None:
     await activity.remove()
     _remember_conversation(request, result)
     await _send_result(result)
+
+
+def _grounding_error_message(
+    error: GroundingUnavailableError, correlation_id: str
+) -> str:
+    return (
+        f"**Answer withheld by:** {error.source}\n\n"
+        f"**Reason:** {error}\n\n"
+        f"**Reference:** `{correlation_id}`"
+    )
 
 
 def _progress_text(

@@ -18,6 +18,7 @@ from apertus_frontend.pipeline import (
     MAX_IMAGE_BYTES,
     ModelCompletion,
     ProgressStage,
+    SafetyAssessment,
     SafetyBlockedError,
     grounding_query,
     grounding_route_hint,
@@ -34,11 +35,15 @@ class FakeSafety:
     image_calls: int = 0
     grounding_calls: int = 0
     groundedness_sources: tuple[str, ...] = ()
+    assessment: SafetyAssessment | None = None
 
-    async def screen_text(self, text: str, *, purpose: str) -> None:
+    async def screen_text(
+        self, text: str, *, purpose: str
+    ) -> SafetyAssessment | None:
         self.text_purposes.append(purpose)
         if purpose == self.blocked_purpose:
             raise SafetyBlockedError(purpose)
+        return self.assessment if purpose == "user-input" else None
 
     async def screen_image(self, attachment: Attachment) -> None:
         self.image_calls += 1
@@ -78,6 +83,7 @@ class FakeModel:
     requests: list[ChatRequest] = field(default_factory=list)
     selected_tool: str | None = None
     tool_arguments_json: str = ""
+    answer: str = "Grounded answer"
 
     async def complete(
         self,
@@ -96,7 +102,7 @@ class FakeModel:
             "search_web" if require_tool else None
         )
         if not selected_tool or not tools:
-            return ModelCompletion(answer="Grounded answer")
+            return ModelCompletion(answer=self.answer)
         arguments_json = self.tool_arguments_json
         if not arguments_json:
             arguments_json = json.dumps(
@@ -110,7 +116,7 @@ class FakeModel:
             ToolCall("call-1", selected_tool, arguments_json)
         )
         return ModelCompletion(
-            answer="Grounded answer",
+            answer=self.answer,
             citations=tuple(
                 Citation(item.title, item.url) for item in result.citations
             ),
@@ -152,6 +158,42 @@ async def test_unsafe_input_never_calls_apertus():
         await service.complete(ChatRequest(text="blocked"), ChatProfile.TOOLS)
 
     assert model.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_model_refusal_explains_decision_source_and_safety_reason():
+    safety = FakeSafety(
+        assessment=SafetyAssessment(category="Violence", severity=2, threshold=4)
+    )
+    model = FakeModel(
+        answer="I cannot provide instructions for making a Molotov cocktail."
+    )
+    service, _, _, _ = make_service(safety=safety, model=model)
+
+    result = await service.complete(
+        ChatRequest(
+            text="Can you give me instructions for making a Molotov cocktail?",
+            correlation_id="refusal-test",
+        ),
+        ChatProfile.TOOLS,
+    )
+
+    assert "Decision source:** Apertus model safety behavior" in result.answer
+    assert "not an Azure AI Content Safety block" in result.answer
+    assert "**Violence** category at severity **2**" in result.answer
+    assert "below the configured block threshold of **4**" in result.answer
+    assert "`refusal-test`" in result.answer
+
+
+@pytest.mark.asyncio
+async def test_normal_model_answer_is_not_annotated_as_refusal():
+    service, _, _, _ = make_service(model=FakeModel(answer="Ordinary answer"))
+
+    result = await service.complete(
+        ChatRequest(text="Explain gravity."), ChatProfile.TOOLS
+    )
+
+    assert result.answer == "Ordinary answer"
 
 
 @pytest.mark.asyncio
@@ -232,6 +274,23 @@ async def test_ungrounded_output_without_citations_is_not_returned():
         )
 
     assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_grounding_error_identifies_groundedness_service():
+    service, _, _, _ = make_service(
+        safety=FakeSafety(grounded=False),
+        grounding=FakeGrounding(GroundingPacket(summary="Uncited evidence")),
+    )
+
+    with pytest.raises(GroundingUnavailableError) as rejected:
+        await service.complete(
+            ChatRequest(text="What is the current score?"), ChatProfile.TOOLS
+        )
+
+    assert rejected.value.source == (
+        "Azure AI Content Safety Groundedness Detection"
+    )
 
 
 @pytest.mark.asyncio

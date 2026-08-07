@@ -12,6 +12,7 @@ from apertus_frontend.azure_services import (
 )
 from apertus_frontend.pipeline import (
     Citation,
+    SafetyAssessment,
     SafetyBlockedError,
 )
 
@@ -180,6 +181,33 @@ async def test_content_safety_block_preserves_rule_and_severity_for_ui():
 
 
 @pytest.mark.asyncio
+async def test_content_safety_returns_non_blocking_category_metadata():
+    client = RecordingClient(
+        payload={
+            "userPromptAnalysis": {"attackDetected": False},
+            "categoriesAnalysis": [
+                {"category": "Hate", "severity": 0},
+                {"category": "Violence", "severity": 2},
+            ],
+        }
+    )
+    gateway = AzureContentSafetyGateway(
+        endpoint="https://safety.example",
+        credential=FakeCredential(),
+        threshold=4,
+        client=client,
+    )
+
+    assessment = await gateway.screen_text(
+        "potentially violent request", purpose="user-input"
+    )
+
+    assert assessment == SafetyAssessment(
+        category="Violence", severity=2, threshold=4
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("model", "expects_reasoning"),
     [
@@ -230,7 +258,16 @@ async def test_web_search_caps_grounding_summary_size():
 @pytest.mark.asyncio
 async def test_web_search_logs_only_support_metadata(caplog):
     client = RecordingClient(
-        payload={"id": "resp_support_123", "output_text": "Evidence", "output": []},
+        payload={
+            "id": "resp_support_123",
+            "output_text": "Evidence",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "action": {"type": "search", "sources": []},
+                }
+            ],
+        },
         headers={
             "apim-request-id": "apim_support_123",
             "x-ms-request-id": "ms_support_123",
@@ -253,5 +290,7 @@ async def test_web_search_logs_only_support_metadata(caplog):
     assert record.custom_dimensions["apim_request_id"] == "apim_support_123"
     assert record.custom_dimensions["x_ms_request_id"] == "ms_support_123"
     assert record.custom_dimensions["request_id"] == "request_support_123"
+    assert record.custom_dimensions["web_search_call_count"] == 1
+    assert record.custom_dimensions["search_action_count"] == 1
     assert "private user query" not in caplog.text
     assert "Evidence" not in caplog.text
