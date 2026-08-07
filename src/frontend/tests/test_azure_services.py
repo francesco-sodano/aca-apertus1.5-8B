@@ -175,8 +175,7 @@ async def test_content_safety_block_preserves_rule_and_severity_for_ui():
     assert blocked.value.severity == 4
     assert blocked.value.threshold == 4
     assert blocked.value.user_message == (
-        "Your message was blocked by Azure AI Content Safety. "
-        "Rule: Violence; severity 4 met the configured block threshold 4."
+        "Your message was blocked by Azure AI Content Safety. Rule: Violence."
     )
 
 

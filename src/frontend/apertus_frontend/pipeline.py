@@ -109,22 +109,10 @@ class SafetyBlockedError(RuntimeError):
 
     @property
     def user_message(self) -> str:
-        subjects = {
-            "user-input": "Your message",
-            "image": "The uploaded image",
-            "grounding": "Retrieved web content",
-            "tool-output": "The selected tool output",
-            "model-output": "The generated answer",
-        }
-        subject = subjects.get(self.stage, "The content")
-        if self.severity is not None and self.threshold is not None:
-            details = (
-                f"Rule: {self.rule}; severity {self.severity} met the configured "
-                f"block threshold {self.threshold}."
-            )
-        else:
-            details = f"Rule: {self.rule}."
-        return f"{subject} was blocked by Azure AI Content Safety. {details}"
+        return (
+            "Your message was blocked by Azure AI Content Safety. "
+            f"Rule: {self.rule}."
+        )
 
 
 @dataclass(frozen=True)
@@ -135,9 +123,10 @@ class SafetyAssessment:
 
 
 class GroundingUnavailableError(RuntimeError):
-    def __init__(self, message: str, *, source: str) -> None:
+    def __init__(self, message: str, *, source: str, rule: str) -> None:
         super().__init__(message)
         self.source = source
+        self.rule = rule
 
 
 @dataclass(frozen=True)
@@ -411,6 +400,7 @@ class GroundedCompletionService:
                 raise GroundingUnavailableError(
                     "The generated answer did not receive an explicit groundedness approval.",
                     source="Azure AI Content Safety Groundedness Detection",
+                    rule="Groundedness approval required",
                 )
 
         model_refusal_explained = False
@@ -492,6 +482,7 @@ class GroundedCompletionService:
             raise GroundingUnavailableError(
                 "Web Search returned no evidence; Apertus was not called.",
                 source="Microsoft Foundry Web Search",
+                rule="Grounding evidence unavailable",
             )
         await self._safety.screen_grounding(query, packet)
         return packet
@@ -585,35 +576,12 @@ def _explain_model_refusal(
     assessment: SafetyAssessment | None,
 ) -> str:
     if assessment is not None:
-        reason = (
-            f"Azure AI Content Safety associated the request with the "
-            f"**{assessment.category}** category at severity "
-            f"**{assessment.severity}**. That was below the configured block "
-            f"threshold of **{assessment.threshold}**, so Azure did not block "
-            "the request; Apertus still declined it under its built-in model "
-            "safety behavior."
-        )
+        rule = assessment.category
     elif _ACTIONABLE_HARM_PATTERN.search(request.text):
-        reason = (
-            "The request asks for actionable instructions that could facilitate "
-            "violence, physical harm, or another abusive action. Azure AI Content "
-            "Safety did not issue this block; Apertus declined it under its "
-            "built-in model safety behavior."
-        )
+        rule = "Violence"
     else:
-        reason = (
-            "Apertus declined the request under its built-in model safety "
-            "behavior. The self-hosted model did not return a machine-readable "
-            "policy category for this refusal."
-        )
-    return (
-        f"{answer.strip()}\n\n"
-        "**Why this was refused**\n"
-        "- **Decision source:** Apertus model safety behavior, not an Azure AI "
-        "Content Safety block.\n"
-        f"- **Reason:** {reason}\n"
-        f"- **Reference:** `{request.correlation_id}`"
-    )
+        rule = "Model safety policy"
+    return f"Your message was blocked by Apertus. Rule: {rule}."
 
 
 async def _report_progress(

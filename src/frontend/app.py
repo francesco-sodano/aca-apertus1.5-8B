@@ -314,7 +314,7 @@ async def on_message(message: cl.Message) -> None:
         )
         await activity.remove()
         await cl.Message(
-            content=_grounding_error_message(exc, request.correlation_id)
+            content=_grounding_error_message(exc)
         ).send()
         return
     except Exception:
@@ -333,13 +333,10 @@ async def on_message(message: cl.Message) -> None:
     await _send_result(result)
 
 
-def _grounding_error_message(
-    error: GroundingUnavailableError, correlation_id: str
-) -> str:
+def _grounding_error_message(error: GroundingUnavailableError) -> str:
     return (
-        f"**Answer withheld by:** {error.source}\n\n"
-        f"**Reason:** {error}\n\n"
-        f"**Reference:** `{correlation_id}`"
+        f"Your message was blocked by {error.source}. "
+        f"Rule: {error.rule}."
     )
 
 

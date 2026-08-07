@@ -16,10 +16,12 @@ def test_grounding_error_names_service_reason_and_reference() -> None:
     error = GroundingUnavailableError(
         "The answer did not receive explicit approval.",
         source="Azure AI Content Safety Groundedness Detection",
+        rule="Groundedness approval required",
     )
 
-    message = _grounding_error_message(error, "grounding-test")
+    message = _grounding_error_message(error)
 
-    assert "Answer withheld by:** Azure AI Content Safety" in message
-    assert "Reason:** The answer did not receive explicit approval." in message
-    assert "`grounding-test`" in message
+    assert message == (
+        "Your message was blocked by Azure AI Content Safety Groundedness "
+        "Detection. Rule: Groundedness approval required."
+    )

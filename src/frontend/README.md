@@ -54,10 +54,9 @@ branch is required. Add argument-validation and selector tests alongside
 Raw audio is intentionally not moderated by Azure AI Content Safety. Disable
 audio uploads if the target policy requires spoken-content moderation.
 
-Safety blocks name Azure AI Content Safety and its policy metadata. Explicit
-Apertus refusals identify the model as the decision source and state when Azure
-did not issue the block. Grounding failures name Foundry Web Search or Azure AI
-Content Safety Groundedness Detection and include a correlation reference.
+Safety blocks and refusals use one concise message that names the blocking
+service and violated rule. Severity, threshold, correlation IDs, and detailed
+classifier metadata remain telemetry-only.
 
 The frontend Dockerfile defaults to `https://pypi.org/simple`. Supply the
 generic `PYTHON_PACKAGE_INDEX_URL` build argument only when another compatible

@@ -178,11 +178,9 @@ async def test_model_refusal_explains_decision_source_and_safety_reason():
         ChatProfile.TOOLS,
     )
 
-    assert "Decision source:** Apertus model safety behavior" in result.answer
-    assert "not an Azure AI Content Safety block" in result.answer
-    assert "**Violence** category at severity **2**" in result.answer
-    assert "below the configured block threshold of **4**" in result.answer
-    assert "`refusal-test`" in result.answer
+    assert result.answer == (
+        "Your message was blocked by Apertus. Rule: Violence."
+    )
 
 
 @pytest.mark.asyncio
