@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Python, Bicep, and hooks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: src/frontend/uv.lock
+
+      - name: Install frozen frontend dependencies
+        run: uv sync --project src/frontend --frozen --dev
+
+      - name: Run frontend tests
+        run: uv run --project src/frontend --frozen pytest -q
+
+      - name: Compile frontend sources
+        working-directory: src/frontend
+        run: uv run --frozen python -m compileall app.py apertus_frontend safety_evaluation.py
+
+      - name: Validate safety evaluation manifest
+        run: uv run --project src/frontend --frozen python src/frontend/safety_evaluation.py --validate-cases
+
+      - name: Install Bicep CLI
+        run: az bicep install
+
+      - name: Compile Bicep
+        run: az bicep build --file infra/main.bicep
+
+      - name: Parse shell scripts
+        run: bash -n infra/hooks/*.sh src/inference/docker-entrypoint.sh
+
+      - name: Test preprovision hook
+        run: bash infra/hooks/tests/preprovision-test.sh
+
+      - name: Test postprovision hook
+        run: bash infra/hooks/tests/postprovision-test.sh
+
+  dockerfiles:
+    name: Dockerfile checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DOCKER_BUILDKIT: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check frontend Dockerfile
+        run: docker build --check --file src/frontend/Dockerfile src/frontend
+
+      - name: Check inference Dockerfile
+        run: docker build --check --file src/inference/Dockerfile src/inference

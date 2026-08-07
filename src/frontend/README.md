@@ -54,9 +54,24 @@ branch is required. Add argument-validation and selector tests alongside
 Raw audio is intentionally not moderated by Azure AI Content Safety. Disable
 audio uploads if the target policy requires spoken-content moderation.
 
+Images pass Content Safety harm-category analysis, but embedded text is not
+OCRed and sent through Prompt Shield. Add that stage or disable image uploads
+when untrusted screenshots or documents are in scope.
+
 Safety blocks and refusals use one concise message that names the blocking
 service and violated rule. Severity, threshold, correlation IDs, and detailed
 classifier metadata remain telemetry-only.
+
+Validate the static safety-case manifest without credentials, then run the same
+two cases against configured Content Safety and Apertus services:
+
+```powershell
+uv run python safety_evaluation.py --validate-cases
+uv run python safety_evaluation.py
+```
+
+The live probe prints only case IDs, blocker/rule metadata, and pass status. It
+does not print the prompts or model answers.
 
 The frontend Dockerfile defaults to `https://pypi.org/simple`. Supply the
 generic `PYTHON_PACKAGE_INDEX_URL` build argument only when another compatible

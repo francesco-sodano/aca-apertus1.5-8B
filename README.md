@@ -118,6 +118,9 @@ retrieve public sources and synthesize a concise cited evidence packet. Apertus
 runs inside the private GPU Container App, selects and uses tools, and writes
 the final answer.
 
+See [the detailed architecture](docs/architecture.md) for request flow,
+networking, scaling, and state boundaries.
+
 ## Apertus 1.5 Native Tools
 
 This deployment exercises Apertus 1.5's native function-calling capability in
@@ -210,6 +213,12 @@ and applies least privilege, defense in depth, and private connectivity.
 Raw audio is the explicit safety exception: MIME type and size are validated,
 but Azure AI Content Safety does not inspect its spoken content in this design.
 Do not enable audio where policy requires audio moderation.
+
+Uploaded images pass Content Safety harm-category analysis, but text embedded
+inside an image is not OCRed and sent through Prompt Shield. Add an OCR and
+Prompt Shield stage, or disable image uploads, when untrusted screenshots or
+documents are in scope. See [Security and Grounding](docs/security-and-grounding.md)
+for the complete trust boundary and production checklist.
 
 ## Install Apertus v1.5 8B on Azure
 
@@ -531,10 +540,12 @@ Set-Location src/frontend
 uv sync --dev
 uv run pytest
 uv run python -m compileall app.py apertus_frontend
+uv run python safety_evaluation.py --validate-cases
 Set-Location ../..
 
 az bicep build --file infra/main.bicep
 bash -n infra/hooks/*.sh src/inference/docker-entrypoint.sh
+bash infra/hooks/tests/preprovision-test.sh
 bash infra/hooks/tests/postprovision-test.sh
 
 docker build --check --file src/frontend/Dockerfile src/frontend
@@ -545,8 +556,17 @@ Running the frontend locally requires Content Safety, Foundry, and an
 OpenAI-compatible Apertus endpoint. See
 [the frontend guide](src/frontend/README.md).
 
+[GitHub Actions CI](.github/workflows/ci.yml) runs these secret-free checks on
+every pull request and push to `main`. The live two-case safety probe is an
+operator release gate because it requires deployed service credentials; see
+[Security and Grounding](docs/security-and-grounding.md#security-evaluation).
+
 ## Operations
 
+- [Architecture](docs/architecture.md)
+- [Security and grounding](docs/security-and-grounding.md)
+- [Deployment and operations](docs/operations.md)
+- [Frontend runtime](src/frontend/README.md)
 - [Inference runtime](src/inference/README.md)
 
 The deployment includes an email action group, a monthly resource-group budget,
