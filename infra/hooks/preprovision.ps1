@@ -79,6 +79,12 @@ if ($env:APPLICATION_SECRETS_READY -ne 'true' -or $env:ROTATE_APPLICATION_SECRET
     }
 }
 
+if ($env:ROTATE_VLLM_SECRET -eq 'true' -and [string]::IsNullOrWhiteSpace($env:VLLM_API_KEY)) {
+    $bytes = [byte[]]::new(32)
+    [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    azd env set VLLM_API_KEY ([Convert]::ToHexString($bytes).ToLowerInvariant()) | Out-Null
+}
+
 if ($env:ACCEPT_APERTUS_LICENSE -ne 'true') {
     throw 'Set ACCEPT_APERTUS_LICENSE=true after accepting the Apertus model terms on Hugging Face.'
 }

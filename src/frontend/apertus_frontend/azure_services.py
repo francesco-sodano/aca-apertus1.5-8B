@@ -6,6 +6,7 @@ import logging
 import time
 from collections.abc import Iterable
 from typing import Any, Protocol
+from uuid import uuid4
 
 import httpx
 
@@ -28,6 +29,8 @@ CONTENT_SAFETY_SCOPE = "https://cognitiveservices.azure.com/.default"
 FOUNDRY_SCOPE = "https://ai.azure.com/.default"
 CONTENT_SAFETY_API_VERSION = "2024-09-01"
 GROUNDEDNESS_API_VERSION = "2024-09-15-preview"
+MAX_GROUNDING_SUMMARY_CHARACTERS = 8_000
+MAX_GROUNDING_CITATIONS = 5
 class AsyncTokenCredential(Protocol):
     async def get_token(self, *scopes: str, **kwargs: Any) -> Any: ...
 
@@ -188,8 +191,9 @@ class FoundryWebSearchGateway:
 
     async def search(self, query: str) -> GroundingPacket:
         started = time.perf_counter()
+        client_request_id = str(uuid4())
 
-        async def request() -> dict[str, Any]:
+        async def request() -> tuple[dict[str, Any], dict[str, str]]:
             token = await self._credential.get_token(FOUNDRY_SCOPE)
             request_body: dict[str, Any] = {
                 "model": self._model,
@@ -198,7 +202,9 @@ class FoundryWebSearchGateway:
                     "grounded only in the retrieved sources. Follow the user's "
                     "requested language and output format. This response may be "
                     "shown directly if downstream validation is inconclusive. "
-                    "Do not mention internal processing. Keep it under 400 words."
+                    "Apply a strict safe-search policy: exclude adult or sexually "
+                    "explicit results and do not quote unsafe material. Do not "
+                    "mention internal processing. Keep it under 400 words."
                 ),
                 "input": query,
                 "max_output_tokens": 600,
@@ -217,13 +223,20 @@ class FoundryWebSearchGateway:
                 )
             response = await self._client.post(
                 f"{self._project_endpoint}/openai/v1/responses",
-                headers={"Authorization": f"Bearer {token.token}"},
+                headers={
+                    "Authorization": f"Bearer {token.token}",
+                    "x-ms-client-request-id": client_request_id,
+                },
                 json=request_body,
             )
             response.raise_for_status()
-            return response.json()
+            return response.json(), {
+                "apim_request_id": response.headers.get("apim-request-id", ""),
+                "x_ms_request_id": response.headers.get("x-ms-request-id", ""),
+                "request_id": response.headers.get("x-request-id", ""),
+            }
 
-        payload = await self._circuit_breaker.call(
+        payload, support_ids = await self._circuit_breaker.call(
             lambda: retry_async(
                 request,
                 is_retryable=is_retryable_service_error,
@@ -232,10 +245,14 @@ class FoundryWebSearchGateway:
             is_failure=is_retryable_service_error,
         )
         summary, citations = _extract_foundry_result(payload)
+        summary = summary[:MAX_GROUNDING_SUMMARY_CHARACTERS].strip()
         logger.info(
             "web_search_completed",
             extra={
                 "custom_dimensions": {
+                    "client_request_id": client_request_id,
+                    "response_id": str(payload.get("id") or ""),
+                    **support_ids,
                     "citation_count": len(citations),
                     "duration_ms": round((time.perf_counter() - started) * 1000),
                     "summary_characters": len(summary),
@@ -303,7 +320,10 @@ def _extract_foundry_result(
     unique: dict[str, Citation] = {}
     for citation in (*inline_citations, *included_sources):
         unique.setdefault(citation.url, citation)
-    return "\n\n".join(texts), tuple(unique.values())[:5]
+    return (
+        "\n\n".join(texts),
+        tuple(unique.values())[:MAX_GROUNDING_CITATIONS],
+    )
 
 
 def _walk_dicts(value: Any) -> Iterable[dict[str, Any]]:

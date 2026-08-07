@@ -37,7 +37,7 @@ Built-ins are defined in [`apertus_frontend/tools.py`](apertus_frontend/tools.py
 
 | Name | Purpose |
 | --- | --- |
-| `search_web` | Foundry Web Search for current or explicitly verified public facts, with Prompt Shield and citations |
+| `search_web` | Foundry Web Search for current or explicitly verified public facts, with strict safe-result instructions, bounded evidence, Prompt Shield, Content Safety, groundedness checks, retries, citations, and support request IDs |
 | `calculator` | Bounded AST-only arithmetic without Python `eval` or arbitrary execution |
 | `get_current_time` | Current date and time for a validated IANA timezone |
 
@@ -53,3 +53,7 @@ branch is required. Add argument-validation and selector tests alongside
 
 Raw audio is intentionally not moderated by Azure AI Content Safety. Disable
 audio uploads if the target policy requires spoken-content moderation.
+
+The frontend Dockerfile defaults to `https://pypi.org/simple`. Supply the
+generic `PYTHON_PACKAGE_INDEX_URL` build argument only when another compatible
+package index is required; do not commit private registry URLs.

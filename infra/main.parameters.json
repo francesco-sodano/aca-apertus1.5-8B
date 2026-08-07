@@ -20,6 +20,9 @@
     "rotateApplicationSecrets": {
       "value": "${ROTATE_APPLICATION_SECRETS=false}"
     },
+    "rotateVllmSecret": {
+      "value": "${ROTATE_VLLM_SECRET=false}"
+    },
     "entraClientId": {
       "value": "${ENTRA_CLIENT_ID}"
     },
@@ -31,6 +34,9 @@
     },
     "monthlyBudgetAmount": {
       "value": "${MONTHLY_BUDGET_AMOUNT=500}"
+    },
+    "budgetStartDate": {
+      "value": "${BUDGET_START_DATE=}"
     },
     "containerRegistryName": {
       "value": "${AZURE_CONTAINER_REGISTRY_NAME=}"

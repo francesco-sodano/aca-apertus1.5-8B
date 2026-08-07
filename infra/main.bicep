@@ -20,6 +20,9 @@ param applicationSecretsReady bool = false
 @description('Replace all application secrets through secure ARM parameters during this deployment.')
 param rotateApplicationSecrets bool = false
 
+@description('Replace only the internal vLLM API key during this deployment.')
+param rotateVllmSecret bool = false
+
 @minLength(36)
 @description('Application (client) ID of the existing single-tenant Entra app registration used by Container Apps Easy Auth.')
 param entraClientId string
@@ -35,6 +38,12 @@ param alertEmail string
 @minValue(1)
 @description('Monthly resource-group budget in the subscription billing currency.')
 param monthlyBudgetAmount int = 500
+
+@description('Existing immutable budget start date. Leave empty only for first creation.')
+param budgetStartDate string = ''
+
+@description('First day of the deployment month used only when creating a new budget.')
+param deploymentMonthStart string = utcNow('yyyy-MM-01T00:00:00Z')
 
 @minValue(1)
 @description('Global Standard capacity for the Foundry grounding model deployment.')
@@ -87,6 +96,7 @@ var resolvedStorageAccountName = empty(storageAccountName) ? 'st${globalEnvironm
 var resolvedKeyVaultName = empty(keyVaultName) ? 'kv-${globalEnvironmentName}-${uniqueSuffix}' : keyVaultName
 var resolvedFoundryAccountName = empty(foundryAccountName) ? 'fdry-${globalEnvironmentName}-${uniqueSuffix}' : foundryAccountName
 var resolvedContentSafetyAccountName = empty(contentSafetyAccountName) ? 'cs-${globalEnvironmentName}-${uniqueSuffix}' : contentSafetyAccountName
+var resolvedBudgetStartDate = empty(budgetStartDate) ? deploymentMonthStart : budgetStartDate
 
 var logAnalyticsName = take('log-${environmentName}', 63)
 var appInsightsName = take('appi-${environmentName}', 260)
@@ -245,28 +255,32 @@ module keyVault 'br/public:avm/res/key-vault/vault:0.14.0' = {
         workspaceResourceId: logAnalytics.outputs.resourceId
       }
     ]
-    secrets: applicationSecretsReady && !rotateApplicationSecrets ? [] : [
-      {
-        contentType: 'Hugging Face read token'
-        name: 'hugging-face-token'
-        value: huggingFaceToken
-      }
-      {
-        contentType: 'Internal vLLM API key'
-        name: 'vllm-api-key'
-        value: vllmApiKey
-      }
-      {
-        contentType: 'Model health endpoint token'
-        name: 'model-health-token'
-        value: modelHealthToken
-      }
-      {
-        contentType: 'Container Apps Easy Auth client secret'
-        name: 'entra-client-secret'
-        value: entraClientSecret
-      }
-    ]
+    secrets: concat(
+      applicationSecretsReady && !rotateApplicationSecrets ? [] : [
+        {
+          contentType: 'Hugging Face read token'
+          name: 'hugging-face-token'
+          value: huggingFaceToken
+        }
+        {
+          contentType: 'Model health endpoint token'
+          name: 'model-health-token'
+          value: modelHealthToken
+        }
+        {
+          contentType: 'Container Apps Easy Auth client secret'
+          name: 'entra-client-secret'
+          value: entraClientSecret
+        }
+      ],
+      applicationSecretsReady && !rotateApplicationSecrets && !rotateVllmSecret ? [] : [
+        {
+          contentType: 'Internal vLLM API key'
+          name: 'vllm-api-key'
+          value: vllmApiKey
+        }
+      ]
+    )
     tags: commonTags
   }
 }
@@ -630,6 +644,7 @@ module monthlyBudget 'br/public:avm/res/consumption/budget/rg-scope:0.1.0' = {
     contactEmails: [
       alertEmail
     ]
+    startDate: resolvedBudgetStartDate
     thresholds: [
       70
       90
@@ -711,6 +726,7 @@ output AZURE_KEY_VAULT_NAME string = keyVault.outputs.name
 output AZURE_STORAGE_ACCOUNT_NAME string = storage.outputs.name
 output AZURE_FOUNDRY_ACCOUNT_NAME string = resolvedFoundryAccountName
 output AZURE_CONTENT_SAFETY_ACCOUNT_NAME string = resolvedContentSafetyAccountName
+output BUDGET_START_DATE string = resolvedBudgetStartDate
 output AZURE_CONTAINER_APPS_ENVIRONMENT_NAME string = managedEnvironment.outputs.name
 output FRONTEND_IDENTITY_RESOURCE_ID string = frontendIdentity.outputs.resourceId
 output FRONTEND_IDENTITY_PRINCIPAL_ID string = frontendIdentity.outputs.principalId

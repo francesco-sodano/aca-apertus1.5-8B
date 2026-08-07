@@ -145,7 +145,7 @@ The built-in registry contains three tools:
 
 | Tool | Apertus selects it for | Input | Key controls |
 | --- | --- | --- | --- |
-| `search_web` | Current, changing, planned, upcoming, priced, status, news, or explicitly verified public information | Standalone query, maximum 500 characters | Foundry Web Search, latest-user context, Prompt Shield, Content Safety, citations, 120-second timeout |
+| `search_web` | Current, changing, planned, upcoming, priced, status, news, or explicitly verified public information | Standalone query, maximum 500 characters | Foundry Web Search, strict safe-result instructions, Prompt Shield, Content Safety, at most 8,000 evidence characters and five citations, retries, 120-second timeout |
 | `calculator` | Deterministic arithmetic | Numeric expression, maximum 200 characters | AST-only operators, bounded complexity/exponents/results, no `eval`, 2-second timeout |
 | `get_current_time` | Current clock time or calendar date in a requested timezone | IANA timezone such as `Europe/Zurich` | IANA validation, no external network call, 2-second timeout |
 
@@ -165,6 +165,11 @@ Stable explanations and writing requests skip Web Search. If the preview
 groundedness detector is inconclusive after a search, the application retries
 once and can return the cited, safety-screened Web Search summary rather than
 discard a successful retrieval.
+
+The public Foundry Responses `web_search` contract does not expose a SafeSearch
+request field. This application therefore applies strict safe-result
+instructions before retrieval synthesis, then enforces Prompt Shield and
+Content Safety over the bounded result before Apertus can use it.
 
 ## Azure Services
 
@@ -200,7 +205,7 @@ and applies least privilege, defense in depth, and private connectivity.
 | Safety boundary | Input, image, evidence, and output checks run before content reaches the browser. Prompt Shield protects retrieved evidence from indirect prompt injection. Unsafe content remains a hard block. |
 | Tool and grounding boundary | Apertus selects among allowlisted schemas. The broker validates arguments, limits execution, safety-screens outputs, preserves citations, and rejects unknown tools or uncited fallback evidence. |
 | Secret handling | Sensitive bootstrap values enter as secure ARM parameters, are stored in Key Vault, and are cleared from the local azd environment after initialization. |
-| Observability privacy | Structured telemetry records stage, duration, result, category, and correlation identifiers, but not raw prompts, attachments, evidence, answers, tokens, or secrets. |
+| Observability privacy | Structured telemetry records stage, duration, result, category, application correlation IDs, and sanitized Foundry/APIM support request IDs, but not raw prompts, attachments, evidence, answers, tokens, or secrets. |
 
 Raw audio is the explicit safety exception: MIME type and size are validated,
 but Azure AI Content Safety does not inspect its spoken content in this design.
@@ -356,6 +361,10 @@ unique names. Optional overrides are:
 - `AZURE_FOUNDRY_ACCOUNT_NAME`
 - `AZURE_CONTENT_SAFETY_ACCOUNT_NAME`
 
+Frontend images use public PyPI by default. Organizations can set the generic
+build-time `PYTHON_PACKAGE_INDEX_URL` azd value to another PEP 503-compatible
+index without changing the Dockerfile or publishing an internal registry URL.
+
 azd supplies `AZURE_ENV_NAME` and `AZURE_PRINCIPAL_ID`. The preprovision hook
 generates the internal vLLM API key and model-health token. Do not create or set
 those values manually.
@@ -463,6 +472,18 @@ After a successful rotation, the hook clears the source secrets and resets
 `ROTATE_APPLICATION_SECRETS=false`. Remove the old Entra credential only after
 the application is verified.
 
+The internal vLLM key rotates independently without replacing the Hugging Face
+or Entra credentials:
+
+```powershell
+azd env set ROTATE_VLLM_SECRET true
+azd up
+```
+
+Preprovision generates the replacement, Key Vault stores it, both Container
+Apps receive versionless secret references, and a successful deployment resets
+`ROTATE_VLLM_SECRET=false`.
+
 ### Recover from an interrupted deployment
 
 Postprovision failures close the temporary ACR build window automatically. If
@@ -482,7 +503,9 @@ azd up
 ```
 
 Provisioning, image build, conversion, and promotion are resumable. A failed
-artifact conversion never updates the inference app.
+artifact conversion never updates the inference app. The budget start date is
+captured from the first successful deployment and passed back through
+`BUDGET_START_DATE`, avoiding immutable-date failures on later deployments.
 
 ### Remove the installation
 

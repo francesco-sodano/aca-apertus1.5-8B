@@ -1,10 +1,12 @@
 from types import SimpleNamespace
+import logging
 
 import pytest
 
 from apertus_frontend.azure_services import (
     AzureContentSafetyGateway,
     FoundryWebSearchGateway,
+    MAX_GROUNDING_SUMMARY_CHARACTERS,
     _blocked_category,
     _extract_foundry_result,
 )
@@ -20,15 +22,18 @@ class FakeCredential:
 
 
 class RecordingClient:
-    def __init__(self, payload=None):
+    def __init__(self, payload=None, headers=None):
         self.body = None
+        self.headers = headers or {}
         self.payload = payload or {"output_text": "Evidence", "output": []}
 
     async def post(self, url, *, headers, json, params=None):
         self.body = json
+        self.request_headers = headers
         return SimpleNamespace(
             raise_for_status=lambda: None,
             json=lambda: self.payload,
+            headers=self.headers,
         )
 
 
@@ -199,5 +204,54 @@ async def test_web_search_uses_model_compatible_latency_controls(
     assert ("text" in client.body) is expects_reasoning
     assert "shown directly" in client.body["instructions"]
     assert "requested language" in client.body["instructions"]
+    assert "strict safe-search policy" in client.body["instructions"]
     assert client.body["tools"][0]["search_context_size"] == "low"
     assert "user_location" not in client.body["tools"][0]
+    assert client.request_headers["x-ms-client-request-id"]
+
+
+@pytest.mark.asyncio
+async def test_web_search_caps_grounding_summary_size():
+    client = RecordingClient(
+        payload={"output_text": "x" * (MAX_GROUNDING_SUMMARY_CHARACTERS + 1)}
+    )
+    gateway = FoundryWebSearchGateway(
+        project_endpoint="https://foundry.example/api/projects/test",
+        model="gpt-4.1-nano-grounding",
+        credential=FakeCredential(),
+        client=client,
+    )
+
+    packet = await gateway.search("Current information")
+
+    assert len(packet.summary) == MAX_GROUNDING_SUMMARY_CHARACTERS
+
+
+@pytest.mark.asyncio
+async def test_web_search_logs_only_support_metadata(caplog):
+    client = RecordingClient(
+        payload={"id": "resp_support_123", "output_text": "Evidence", "output": []},
+        headers={
+            "apim-request-id": "apim_support_123",
+            "x-ms-request-id": "ms_support_123",
+            "x-request-id": "request_support_123",
+        },
+    )
+    gateway = FoundryWebSearchGateway(
+        project_endpoint="https://foundry.example/api/projects/test",
+        model="gpt-4.1-nano-grounding",
+        credential=FakeCredential(),
+        client=client,
+    )
+
+    with caplog.at_level(logging.INFO, logger="apertus.frontend.azure"):
+        await gateway.search("private user query")
+
+    record = next(item for item in caplog.records if item.msg == "web_search_completed")
+    assert record.custom_dimensions["client_request_id"]
+    assert record.custom_dimensions["response_id"] == "resp_support_123"
+    assert record.custom_dimensions["apim_request_id"] == "apim_support_123"
+    assert record.custom_dimensions["x_ms_request_id"] == "ms_support_123"
+    assert record.custom_dimensions["request_id"] == "request_support_123"
+    assert "private user query" not in caplog.text
+    assert "Evidence" not in caplog.text

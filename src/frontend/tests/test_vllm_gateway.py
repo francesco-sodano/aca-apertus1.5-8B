@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
+from apertus_frontend.resilience import RetryPolicy
 from apertus_frontend.pipeline import (
     Attachment,
     ChatProfile,
@@ -51,6 +53,27 @@ class FakeCompletions:
 class FakeClient:
     def __init__(self):
         self.chat = SimpleNamespace(completions=FakeCompletions())
+
+
+class TransientThenAnswerCompletions(FakeCompletions):
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            raise httpx.ConnectError("temporary vLLM connection failure")
+
+        async def chunks():
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content="Recovered answer",
+                            tool_calls=[],
+                        )
+                    )
+                ]
+            )
+
+        return chunks()
 
 
 class UnexpectedToolCompletions:
@@ -212,6 +235,35 @@ async def test_profiles_use_same_endpoint_with_different_template_flags():
     assert "tools" not in tools_call
     assert thinking_call["extra_body"]["chat_template_kwargs"]["enable_thinking"] is True
     assert "tools" not in thinking_call
+
+
+@pytest.mark.asyncio
+async def test_vllm_retries_transient_connection_failure():
+    client = FakeClient()
+    client.chat.completions = TransientThenAnswerCompletions()
+    gateway = VllmGateway(
+        base_url="http://internal-apertus/v1",
+        api_key="secret",
+        model="swiss-ai/Apertus-v1.5-8B",
+        client=client,
+        retry_policy=RetryPolicy(
+            attempts=2,
+            base_delay_seconds=0,
+            max_delay_seconds=0,
+        ),
+    )
+
+    result = await gateway.complete(
+        request=ChatRequest(text="Question"),
+        profile=ChatProfile.TOOLS,
+        grounding=GroundingPacket(summary=""),
+        tools=(),
+        execute_tool=execute_calculator,
+        require_tool=False,
+    )
+
+    assert result.answer == "Recovered answer"
+    assert len(client.chat.completions.calls) == 2
 
 
 @pytest.mark.asyncio

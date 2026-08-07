@@ -189,6 +189,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Frontend secret environment configuration fail
 
     azd env set APERTUS_IMAGE_TAG '' | Out-Null
     azd env set ROTATE_APPLICATION_SECRETS false | Out-Null
+    azd env set ROTATE_VLLM_SECRET false | Out-Null
     Write-Host 'Inference image promoted and frontend secrets configured successfully.'
 }
 catch {

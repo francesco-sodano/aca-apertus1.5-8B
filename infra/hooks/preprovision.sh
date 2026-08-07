@@ -74,6 +74,10 @@ if [[ "${APPLICATION_SECRETS_READY:-false}" != 'true' || "${ROTATE_APPLICATION_S
   fi
 fi
 
+if [[ "${ROTATE_VLLM_SECRET:-false}" == 'true' && -z "${VLLM_API_KEY:-}" ]]; then
+  azd env set VLLM_API_KEY "$(openssl rand -hex 32)" >/dev/null
+fi
+
 if [[ "${ACCEPT_APERTUS_LICENSE:-false}" != 'true' ]]; then
   echo 'Set ACCEPT_APERTUS_LICENSE=true after accepting the Apertus model terms on Hugging Face.' >&2
   exit 1

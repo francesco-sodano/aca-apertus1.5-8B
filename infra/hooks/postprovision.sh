@@ -251,4 +251,5 @@ az containerapp update \
 
 azd env set APERTUS_IMAGE_TAG '' >/dev/null
 azd env set ROTATE_APPLICATION_SECRETS false >/dev/null
+azd env set ROTATE_VLLM_SECRET false >/dev/null
 echo 'Inference image promoted and frontend secrets configured successfully.'

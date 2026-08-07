@@ -1,4 +1,5 @@
 .azure/
+.chainlit/
 .ruff_cache/
 docs/architecture.md
 docs/operations.md
