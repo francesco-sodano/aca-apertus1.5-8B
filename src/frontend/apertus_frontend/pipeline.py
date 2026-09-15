@@ -50,6 +50,10 @@ _TEMPORAL_WEB_PATTERN = re.compile(
     r"\b(?:next|upcoming|planned|scheduled)\b.{0,160}\b(?:when|date|time)\b",
     re.IGNORECASE,
 )
+_PUBLISHED_WORK_FACT_PATTERN = re.compile(
+    r"\b(?:plot|synopsis|cast|release date|ending)\s+(?:of|for)\b",
+    re.IGNORECASE,
+)
 _FOLLOW_UP_PATTERN = re.compile(
     r"^(?:and|also|what about|how about|then|their|theirs|it|that|those)\b",
     re.IGNORECASE,
@@ -406,7 +410,11 @@ class GroundedCompletionService:
         model_refusal_explained = False
         if (
             not groundedness_fallback_used
-            and _looks_like_model_refusal(completion.answer)
+            and _looks_like_safety_refusal(
+                request=request,
+                answer=completion.answer,
+                assessment=input_safety_assessment,
+            )
         ):
             completion = ModelCompletion(
                 answer=_explain_model_refusal(
@@ -530,6 +538,7 @@ def grounding_route_hint(request: ChatRequest) -> bool | None:
     if (
         _WEB_GROUNDING_PATTERN.search(current)
         or _TEMPORAL_WEB_PATTERN.search(current)
+        or _PUBLISHED_WORK_FACT_PATTERN.search(current)
     ):
         return True
     current_year = datetime.now(UTC).year
@@ -567,6 +576,18 @@ def grounding_query(request: ChatRequest) -> str:
 
 def _looks_like_model_refusal(answer: str) -> bool:
     return bool(_MODEL_REFUSAL_PATTERN.search(answer[:500]))
+
+
+def _looks_like_safety_refusal(
+    *,
+    request: ChatRequest,
+    answer: str,
+    assessment: SafetyAssessment | None,
+) -> bool:
+    return _looks_like_model_refusal(answer) and (
+        assessment is not None
+        or bool(_ACTIONABLE_HARM_PATTERN.search(request.text))
+    )
 
 
 def _explain_model_refusal(

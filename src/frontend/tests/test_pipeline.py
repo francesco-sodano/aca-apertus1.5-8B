@@ -195,6 +195,21 @@ async def test_normal_model_answer_is_not_annotated_as_refusal():
 
 
 @pytest.mark.asyncio
+async def test_harmless_model_limitation_is_not_mislabeled_as_safety():
+    model = FakeModel(
+        answer="I cannot confirm a plot from the information available."
+    )
+    service, _, _, _ = make_service(model=model)
+
+    result = await service.complete(
+        ChatRequest(text="Summarize an obscure fictional work."),
+        ChatProfile.THINKING,
+    )
+
+    assert result.answer == model.answer
+
+
+@pytest.mark.asyncio
 async def test_citation_free_evidence_can_still_ground_an_answer():
     service, safety, grounding, model = make_service(
         grounding=FakeGrounding(GroundingPacket(summary="No cited evidence"))
@@ -481,6 +496,17 @@ async def test_apertus_can_answer_stable_fact_without_a_tool():
 )
 def test_temporal_freshness_phrasing_routes_directly_to_web(text):
     assert grounding_route_hint(ChatRequest(text=text)) is True
+
+
+def test_named_movie_plot_without_year_routes_directly_to_web():
+    request = ChatRequest(
+        text=(
+            "Give me the plot of Christopher Nolan's movie The Odyssey. "
+            "Translate it into Romansh."
+        )
+    )
+
+    assert grounding_route_hint(request) is True
 
 
 @pytest.mark.parametrize("text", ["What is a president?", "Share some good news."])
