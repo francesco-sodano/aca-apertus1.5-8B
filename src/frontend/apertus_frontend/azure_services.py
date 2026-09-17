@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 import httpx
+from opentelemetry.trace import SpanKind
 
 from .pipeline import (
     Attachment,
@@ -23,6 +24,7 @@ from .resilience import (
     is_retryable_service_error,
     retry_async,
 )
+from .tracing import record_messages, record_response_metadata, set_attributes, trace_scope, traced
 
 logger = logging.getLogger("apertus.frontend.azure")
 
@@ -32,6 +34,12 @@ CONTENT_SAFETY_API_VERSION = "2024-09-01"
 GROUNDEDNESS_API_VERSION = "2024-09-15-preview"
 MAX_GROUNDING_SUMMARY_CHARACTERS = 8_000
 MAX_GROUNDING_CITATIONS = 5
+
+
+class SafetyResponseError(RuntimeError):
+    """A moderation service response did not contain an explicit valid decision."""
+
+
 class AsyncTokenCredential(Protocol):
     async def get_token(self, *scopes: str, **kwargs: Any) -> Any: ...
 
@@ -55,10 +63,16 @@ class AzureContentSafetyGateway:
         self._retry_policy = retry_policy
         self._circuit_breaker = AsyncCircuitBreaker()
 
+    @traced("content_safety.text")
     async def screen_text(
         self, text: str, *, purpose: str
     ) -> SafetyAssessment | None:
+        set_attributes(**{
+            "apertus.safety.stage": purpose,
+            "apertus.safety.threshold": self._threshold,
+        })
         if not text.strip():
+            set_attributes(**{"apertus.outcome": "skipped"})
             return None
         if purpose == "user-input":
             shield = await self._post(
@@ -66,7 +80,11 @@ class AzureContentSafetyGateway:
                 {"userPrompt": text},
                 CONTENT_SAFETY_API_VERSION,
             )
-            if shield.get("userPromptAnalysis", {}).get("attackDetected") is True:
+            attack_detected = _attack_detected(shield.get("userPromptAnalysis"))
+            set_attributes(**{
+                "apertus.safety.attack_detected": attack_detected,
+            })
+            if attack_detected:
                 raise SafetyBlockedError(
                     f"{purpose}: prompt attack",
                     stage=purpose,
@@ -78,7 +96,13 @@ class AzureContentSafetyGateway:
             {"text": text, "outputType": "EightSeverityLevels"},
             CONTENT_SAFETY_API_VERSION,
         )
+        _validate_categories(result, image=False)
         assessment = _highest_category_details(result)
+        if assessment:
+            set_attributes(**{
+                "apertus.safety.category": assessment[0],
+                "apertus.safety.severity": assessment[1],
+            })
         if assessment and assessment[1] >= self._threshold:
             category, severity = assessment
             raise SafetyBlockedError(
@@ -88,6 +112,7 @@ class AzureContentSafetyGateway:
                 severity=severity,
                 threshold=self._threshold,
             )
+            set_attributes(**{"apertus.outcome": "allowed"})
         if assessment and assessment[1] > 0:
             return SafetyAssessment(
                 category=assessment[0],
@@ -96,7 +121,13 @@ class AzureContentSafetyGateway:
             )
         return None
 
+    @traced("content_safety.image")
     async def screen_image(self, attachment: Attachment) -> None:
+        set_attributes(**{
+            "apertus.safety.stage": "image",
+            "apertus.safety.threshold": self._threshold,
+            "apertus.image.mime_type": attachment.mime_type,
+        })
         result = await self._post(
             "/contentsafety/image:analyze",
             {
@@ -105,6 +136,13 @@ class AzureContentSafetyGateway:
             },
             CONTENT_SAFETY_API_VERSION,
         )
+        _validate_categories(result, image=True)
+        assessment = _highest_category_details(result)
+        if assessment:
+            set_attributes(**{
+                "apertus.safety.category": assessment[0],
+                "apertus.safety.severity": assessment[1],
+            })
         blocked = _blocked_category_details(result, self._threshold)
         if blocked:
             category, severity = blocked
@@ -115,25 +153,36 @@ class AzureContentSafetyGateway:
                 severity=severity,
                 threshold=self._threshold,
             )
+        set_attributes(**{"apertus.outcome": "allowed"})
 
+    @traced("content_safety.grounding")
     async def screen_grounding(self, prompt: str, packet: GroundingPacket) -> None:
+        set_attributes(**{"apertus.safety.stage": "grounding"})
         result = await self._post(
             "/contentsafety/text:shieldPrompt",
             {"userPrompt": prompt, "documents": [packet.summary]},
             CONTENT_SAFETY_API_VERSION,
         )
-        analyses = result.get("documentsAnalysis") or []
-        if any(item.get("attackDetected") is True for item in analyses):
+        analyses = result.get("documentsAnalysis")
+        if not isinstance(analyses, list) or len(analyses) != 1:
+            raise SafetyResponseError("Prompt Shield did not return one evidence decision.")
+        attack_detected = _attack_detected(analyses[0])
+        set_attributes(**{"apertus.safety.attack_detected": attack_detected})
+        if attack_detected:
             raise SafetyBlockedError(
                 "grounding: indirect prompt attack",
                 stage="grounding",
                 rule="Indirect prompt attack detection",
             )
+        set_attributes(**{"apertus.outcome": "allowed"})
 
+    @traced("groundedness.detect")
     async def is_grounded(
         self, *, query: str, answer: str, sources: tuple[str, ...]
     ) -> bool | None:
+        set_attributes(**{"apertus.grounding_source_count": len(sources)})
         if not answer.strip() or not sources:
+            set_attributes(**{"apertus.groundedness_result": "ungrounded"})
             return False
         result = await self._post(
             "/contentsafety/text:detectGroundedness",
@@ -147,9 +196,12 @@ class AzureContentSafetyGateway:
             },
             GROUNDEDNESS_API_VERSION,
         )
-        if "ungroundedDetected" not in result:
+        if not isinstance(result.get("ungroundedDetected"), bool):
+            set_attributes(**{"apertus.groundedness_result": "indeterminate"})
             return None
-        return not bool(result["ungroundedDetected"])
+        grounded = not bool(result["ungroundedDetected"])
+        set_attributes(**{"apertus.groundedness_result": "grounded" if grounded else "ungrounded"})
+        return grounded
 
     async def _post(
         self, path: str, payload: dict[str, Any], api_version: str
@@ -162,21 +214,56 @@ class AzureContentSafetyGateway:
                 headers={"Authorization": f"Bearer {token.token}"},
                 json=payload,
             )
+            set_attributes(**{"http.response.status_code": getattr(response, "status_code", None)})
             response.raise_for_status()
             return response.json()
 
-        return await self._circuit_breaker.call(
-            lambda: retry_async(
-                request,
-                is_retryable=is_retryable_service_error,
-                policy=self._retry_policy,
-            ),
-            is_failure=is_retryable_service_error,
-        )
+        operation = path.rsplit(":", 1)[-1]
+        with trace_scope(
+            f"content_safety.{operation}",
+            kind=SpanKind.CLIENT,
+            attributes={"apertus.api_version": api_version},
+        ):
+            return await self._circuit_breaker.call(
+                lambda: retry_async(
+                    request,
+                    is_retryable=is_retryable_service_error,
+                    policy=self._retry_policy,
+                ),
+                is_failure=is_retryable_service_error,
+            )
 
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+
+def _attack_detected(analysis: Any) -> bool:
+    if not isinstance(analysis, dict) or not isinstance(analysis.get("attackDetected"), bool):
+        raise SafetyResponseError("Prompt Shield did not return an explicit attack decision.")
+    return analysis["attackDetected"]
+
+
+def _validate_categories(payload: dict[str, Any], *, image: bool) -> None:
+    categories = payload.get("categoriesAnalysis")
+    required = {"Hate", "SelfHarm", "Sexual", "Violence"}
+    if not isinstance(categories, list) or len(categories) != len(required):
+        raise SafetyResponseError("Content Safety did not return all category decisions.")
+    severities = {0, 2, 4, 6} if image else set(range(8))
+    seen = set()
+    for category in categories:
+        if not isinstance(category, dict):
+            raise SafetyResponseError("Content Safety returned an invalid category decision.")
+        name, severity = category.get("category"), category.get("severity")
+        if (
+            not isinstance(name, str)
+            or name not in required
+            or name in seen
+            or type(severity) is not int
+            or severity not in severities
+        ):
+            raise SafetyResponseError("Content Safety returned an invalid category decision.")
+        seen.add(name)
 
 
 class FoundryWebSearchGateway:
@@ -199,9 +286,20 @@ class FoundryWebSearchGateway:
         self._retry_policy = retry_policy
         self._circuit_breaker = AsyncCircuitBreaker()
 
+    @traced(
+        "foundry.web_search",
+        kind=SpanKind.CLIENT,
+        attributes={"gen_ai.operation.name": "chat", "gen_ai.provider.name": "azure.ai.openai"},
+    )
     async def search(self, query: str) -> GroundingPacket:
         started = time.perf_counter()
         client_request_id = str(uuid4())
+        set_attributes(**{
+            "gen_ai.request.model": self._model,
+            "gen_ai.request.max_tokens": 600,
+            "apertus.foundry.client_request_id": client_request_id,
+        })
+        record_messages("gen_ai.input.messages", [{"role": "user", "content": query}])
 
         async def request() -> tuple[dict[str, Any], dict[str, str]]:
             token = await self._credential.get_token(FOUNDRY_SCOPE)
@@ -239,6 +337,7 @@ class FoundryWebSearchGateway:
                 },
                 json=request_body,
             )
+            set_attributes(**{"http.response.status_code": getattr(response, "status_code", None)})
             response.raise_for_status()
             return response.json(), {
                 "apim_request_id": response.headers.get("apim-request-id", ""),
@@ -266,6 +365,15 @@ class FoundryWebSearchGateway:
             for item in web_search_calls
             if (item.get("action") or {}).get("type") == "search"
         )
+        record_response_metadata(payload)
+        record_messages("gen_ai.output.messages", [{"role": "assistant", "content": summary}])
+        set_attributes(**{
+            "apertus.web_search_call_count": len(web_search_calls),
+            "apertus.search_action_count": search_action_count,
+            "apertus.citation_count": len(citations),
+            "apertus.evidence_characters": len(summary),
+            **{f"apertus.foundry.{name}": value for name, value in support_ids.items() if value},
+        })
         logger.info(
             "web_search_completed",
             extra={

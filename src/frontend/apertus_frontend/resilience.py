@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from typing import TypeVar
 
 import httpx
+from openai import APIConnectionError
+from opentelemetry import trace
+
+from .tracing import set_attributes
 
 T = TypeVar("T")
 
@@ -58,9 +62,13 @@ class AsyncCircuitBreaker:
         async with self._lock:
             if self._opened_at is not None:
                 if time.monotonic() - self._opened_at < self._recovery_seconds:
+                    set_attributes(**{"apertus.circuit.state": "open"})
                     raise CircuitOpenError("Dependency circuit is temporarily open.")
                 self._opened_at = None
                 self._failures = 0
+                set_attributes(**{"apertus.circuit.state": "half_open"})
+            else:
+                set_attributes(**{"apertus.circuit.state": "closed"})
 
         try:
             result = await operation()
@@ -70,11 +78,13 @@ class AsyncCircuitBreaker:
                     self._failures += 1
                     if self._failures >= self._failure_threshold:
                         self._opened_at = time.monotonic()
+                        set_attributes(**{"apertus.circuit.state": "open"})
             raise
 
         async with self._lock:
             self._failures = 0
             self._opened_at = None
+        set_attributes(**{"apertus.circuit.state": "closed"})
         return result
 
 
@@ -86,6 +96,10 @@ async def retry_async(
 ) -> T:
     """Retry transient failures with server hints or jittered exponential delay."""
     for attempt in range(1, policy.attempts + 1):
+        set_attributes(**{
+            "apertus.attempt_count": attempt,
+            "apertus.retry_count": attempt - 1,
+        })
         try:
             return await operation()
         except Exception as exc:
@@ -97,12 +111,18 @@ async def retry_async(
                 policy.base_delay_seconds * (2 ** (attempt - 1)),
             )
             delay = retry_after if retry_after is not None else exponential
-            await asyncio.sleep(delay + random.uniform(0, max(delay * 0.2, 0.01)))
+            delay += random.uniform(0, max(delay * 0.2, 0.01))
+            trace.get_current_span().add_event("retry", {
+                "apertus.failed_attempt": attempt,
+                "apertus.retry_delay_ms": delay * 1000,
+                "error.type": type(exc).__name__,
+            })
+            await asyncio.sleep(delay)
     raise RuntimeError("Retry loop exited unexpectedly.")
 
 
 def is_retryable_service_error(exc: Exception) -> bool:
-    if isinstance(exc, (httpx.ConnectError, httpx.TimeoutException)):
+    if isinstance(exc, (APIConnectionError, httpx.ConnectError, httpx.TimeoutException)):
         return True
     status_code = getattr(exc, "status_code", None)
     if status_code is None and isinstance(exc, httpx.HTTPStatusError):

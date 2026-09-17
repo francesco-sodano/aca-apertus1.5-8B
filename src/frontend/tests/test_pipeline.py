@@ -509,6 +509,60 @@ def test_named_movie_plot_without_year_routes_directly_to_web():
     assert grounding_route_hint(request) is True
 
 
+@pytest.mark.asyncio
+async def test_request_and_tool_spans_share_trace_and_capture_opt_in_content(traced_spans, monkeypatch):
+    monkeypatch.setenv("TRACE_CONTENT", "true")
+    service, _, _, _ = make_service()
+
+    await service.complete(
+        ChatRequest(text="What is the current score?", correlation_id="traced-request"),
+        ChatProfile.TOOLS,
+    )
+
+    spans = traced_spans.get_finished_spans()
+    root = next(span for span in spans if span.name == "apertus.request")
+    tool = next(span for span in spans if span.name == "tool.execute")
+    assert root.attributes["apertus.correlation_id"] == "traced-request"
+    assert root.attributes["apertus.selected_tools"] == ("search_web",)
+    assert root.attributes["apertus.outcome"] == "completed"
+    assert tool.parent.span_id == root.context.span_id
+    assert len({span.context.trace_id for span in spans}) == 1
+    assert "current score" in tool.attributes["gen_ai.tool.call.arguments"]
+    assert tool.attributes["gen_ai.tool.call.result"] == "Verified evidence"
+    assert "Grounded answer" in root.attributes["gen_ai.output.messages"]
+
+
+@pytest.mark.asyncio
+async def test_safety_block_ends_request_trace_without_model_call(traced_spans):
+    service, _, _, model = make_service(safety=FakeSafety(blocked_purpose="user-input"))
+
+    with pytest.raises(SafetyBlockedError):
+        await service.complete(ChatRequest(text="Test input"), ChatProfile.TOOLS)
+
+    root = next(span for span in traced_spans.get_finished_spans() if span.name == "apertus.request")
+    assert root.attributes["apertus.outcome"] == "blocked"
+    assert root.attributes["error.type"] == "SafetyBlockedError"
+    assert model.calls == 0
+    assert "gen_ai.input.messages" not in root.attributes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("grounded", [False, None])
+async def test_regeneration_and_fallback_are_visible_in_request_trace(traced_spans, grounded):
+    service, _, _, _ = make_service(safety=FakeSafety(grounded=grounded))
+
+    await service.complete(ChatRequest(text="What is the current score?"), ChatProfile.TOOLS)
+
+    spans = traced_spans.get_finished_spans()
+    root = next(span for span in spans if span.name == "apertus.request")
+    assert root.attributes["apertus.regeneration_count"] == 1
+    assert root.attributes["apertus.groundedness_checked"] is True
+    assert root.attributes["apertus.groundedness_result"] == ("indeterminate" if grounded is None else "ungrounded")
+    assert root.attributes["apertus.groundedness_fallback_used"] is True
+    assert root.attributes["apertus.outcome"] == "search_summary"
+    assert any(span.name == "apertus.regenerate" for span in spans)
+
+
 @pytest.mark.parametrize("text", ["What is a president?", "Share some good news."])
 def test_ambiguous_factual_phrasing_leaves_tool_choice_to_apertus(text):
     assert grounding_route_hint(ChatRequest(text=text)) is None

@@ -1,5 +1,7 @@
 .azure/
 .chainlit/
+.claude/
+.files/
 .ruff_cache/
 
 infra/main.json

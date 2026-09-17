@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import hmac
 import logging
 import os
@@ -16,6 +17,8 @@ from azure.identity.aio import DefaultAzureCredential
 from chainlit.server import app
 from chainlit.context import context
 from fastapi import Header, HTTPException, Response, status
+from opentelemetry.trace import SpanKind
+from opentelemetry import trace
 
 from apertus_frontend.azure_services import (
     AzureContentSafetyGateway,
@@ -40,6 +43,7 @@ from apertus_frontend.resilience import (
     RateLimitExceededError,
     RequestAdmissionController,
 )
+from apertus_frontend.tracing import configure_tracing, record_error, record_messages, set_attributes, traced
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -47,10 +51,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("apertus.frontend")
 
-if os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING"):
-    from azure.monitor.opentelemetry import configure_azure_monitor
-
-    configure_azure_monitor(logger_name="apertus")
+configure_tracing()
 
 
 class Runtime:
@@ -129,12 +130,18 @@ def get_runtime() -> Runtime:
     return _runtime
 
 
-@app.on_event("shutdown")
+@cl.on_app_shutdown
 async def shutdown_runtime() -> None:
     global _runtime
-    if _runtime is not None:
-        await _runtime.aclose()
+    runtime = _runtime
+    try:
+        if runtime is not None:
+            await runtime.aclose()
+    finally:
         _runtime = None
+        flush = getattr(trace.get_tracer_provider(), "force_flush", None)
+        if flush is not None:
+            await asyncio.to_thread(flush, timeout_millis=5000)
 
 
 @app.get("/healthz", include_in_schema=False)
@@ -240,6 +247,7 @@ async def set_starters(
 
 
 @cl.on_message
+@traced("apertus.chat", kind=SpanKind.SERVER, new_trace=True)
 async def on_message(message: cl.Message) -> None:
     request = ChatRequest(
         text=message.content or "",
@@ -252,6 +260,10 @@ async def on_message(message: cl.Message) -> None:
         if profile_name == ChatProfile.THINKING.value
         else ChatProfile.TOOLS
     )
+    set_attributes(**{
+        "apertus.correlation_id": request.correlation_id,
+        "apertus.profile": profile.value,
+    })
 
     if any(item.is_audio for item in request.attachments):
         await cl.Message(
@@ -279,14 +291,17 @@ async def on_message(message: cl.Message) -> None:
                 on_progress=report_progress,
             )
     except (RateLimitExceededError, CapacityExceededError) as exc:
+        record_error(exc)
         await activity.remove()
-        await cl.Message(content=str(exc)).send()
+        await _send_notice(str(exc))
         return
     except ValueError as exc:
+        record_error(exc)
         await activity.remove()
-        await cl.Message(content=str(exc)).send()
+        await _send_notice(str(exc))
         return
     except SafetyBlockedError as exc:
+        record_error(exc)
         logger.info(
             "request_blocked",
             extra={
@@ -300,9 +315,10 @@ async def on_message(message: cl.Message) -> None:
             },
         )
         await activity.remove()
-        await cl.ErrorMessage(content=exc.user_message).send()
+        await _send_notice(exc.user_message, blocked=True)
         return
     except GroundingUnavailableError as exc:
+        record_error(exc)
         logger.info(
             "grounding_rejected",
             extra={
@@ -313,24 +329,22 @@ async def on_message(message: cl.Message) -> None:
             },
         )
         await activity.remove()
-        await cl.Message(
-            content=_grounding_error_message(exc)
-        ).send()
+        await _send_notice(_grounding_error_message(exc))
         return
-    except Exception:
-        logger.exception(
+    except Exception as exc:
+        record_error(exc)
+        logger.error(
             "request_failed",
-            extra={"custom_dimensions": {"correlation_id": request.correlation_id}},
+            extra={"custom_dimensions": {"correlation_id": request.correlation_id, "error_type": type(exc).__name__}},
         )
         await activity.remove()
-        await cl.Message(
-            content=f"The request failed. Reference: `{request.correlation_id}`"
-        ).send()
+        await _send_notice(f"The request failed. Reference: `{request.correlation_id}`")
         return
 
     await activity.remove()
     _remember_conversation(request, result)
     await _send_result(result)
+    set_attributes(**{"apertus.outcome": "delivered"})
 
 
 def _grounding_error_message(error: GroundingUnavailableError) -> str:
@@ -410,6 +424,15 @@ def _read_attachment(element) -> Attachment:
     )
 
 
+@traced("apertus.respond")
+async def _send_notice(text: str, *, blocked: bool = False) -> None:
+    record_messages("gen_ai.output.messages", [{"role": "assistant", "content": text}])
+    message_class = cl.ErrorMessage if blocked else cl.Message
+    await message_class(content=text).send()
+    set_attributes(**{"apertus.delivery_status": "sent"})
+
+
+@traced("apertus.respond")
 async def _send_result(result: CompletionResult) -> None:
     text = result.answer
     if result.citations:
@@ -419,9 +442,11 @@ async def _send_result(result: CompletionResult) -> None:
         )
         text = f"{text}\n\n**Sources**\n{sources}"
 
+    record_messages("gen_ai.output.messages", [{"role": "assistant", "content": text}])
     answer = cl.Message(content="")
     await answer.send()
     for token in re.split(r"(\s+)", text):
         if token:
             await answer.stream_token(token)
     await answer.update()
+    set_attributes(**{"apertus.delivery_status": "sent"})

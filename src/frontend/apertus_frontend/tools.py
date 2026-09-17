@@ -73,10 +73,14 @@ class ToolSpec:
 class ToolRegistry:
     """Resolve and execute only registered tools after strict schema validation."""
 
-    def __init__(self, specs: tuple[ToolSpec, ...]) -> None:
+    def __init__(self, specs: tuple[ToolSpec, ...], *, max_total_calls: int = 1) -> None:
         self._specs = {spec.name: spec for spec in specs}
         if len(self._specs) != len(specs):
             raise ValueError("Tool names must be unique.")
+        if max_total_calls < 1 or any(spec.max_calls < 1 for spec in specs):
+            raise ValueError("Tool call budgets must be positive.")
+        self._max_total_calls = max_total_calls
+        self._calls: dict[str, int] = {}
 
     @property
     def specs(self) -> tuple[ToolSpec, ...]:
@@ -90,6 +94,11 @@ class ToolRegistry:
 
     async def execute(self, call: ToolCall) -> ToolResult:
         spec = self.get(call.name)
+        if (
+            sum(self._calls.values()) >= self._max_total_calls
+            or self._calls.get(call.name, 0) >= spec.max_calls
+        ):
+            raise ToolValidationError("Tool call budget exhausted for this request.")
         try:
             arguments = json.loads(call.arguments_json or "{}")
         except json.JSONDecodeError as exc:
@@ -110,6 +119,7 @@ class ToolRegistry:
                 f"Invalid {call.name} arguments: {errors[0].message}"
             )
 
+        self._calls[call.name] = self._calls.get(call.name, 0) + 1
         try:
             async with asyncio.timeout(spec.timeout_seconds):
                 return await spec.handler(arguments)
@@ -145,7 +155,7 @@ async def calculate(arguments: dict[str, Any]) -> ToolResult:
 
     try:
         result = _evaluate_number(tree.body)
-    except (OverflowError, ZeroDivisionError) as exc:
+    except (OverflowError, ZeroDivisionError, TypeError, ValueError) as exc:
         raise ToolValidationError("Calculator expression cannot be evaluated.") from exc
     if not math.isfinite(result) or abs(result) > 1e15:
         raise ToolValidationError("Calculator result is outside the allowed range.")
@@ -159,7 +169,7 @@ async def calculate(arguments: dict[str, Any]) -> ToolResult:
 
 
 def _evaluate_number(node: ast.AST) -> float:
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+    if isinstance(node, ast.Constant) and type(node.value) in {int, float}:
         return float(node.value)
     if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPERATORS:
         return _UNARY_OPERATORS[type(node.op)](_evaluate_number(node.operand))

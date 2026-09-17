@@ -1,4 +1,17 @@
 .venv/
+.git/
+.azure/
+.env
+.env.*
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.pfx
+**/*.p12
+.files/
+build/
+*.egg-info/
 __pycache__/
 .pytest_cache/
 tests/

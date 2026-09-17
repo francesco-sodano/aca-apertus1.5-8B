@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from openai import AsyncOpenAI
+from opentelemetry.trace import SpanKind
 
 from .pipeline import (
     Attachment,
@@ -23,6 +25,7 @@ from .resilience import (
     retry_async,
 )
 from .tools import ToolCall, ToolExecutor, ToolSpec, ToolValidationError
+from .tracing import record_messages, record_response_metadata, set_attributes, traced
 
 IDENTITY_INSTRUCTIONS = """You are Apertus v1.5 8B, the open multilingual language model from the Swiss AI Initiative. You are not ChatGPT and were not developed by OpenAI. This application runs Apertus on Microsoft Azure."""
 
@@ -163,65 +166,9 @@ class VllmGateway:
         grounding_sources: list[str] = []
         selected_tools: list[str] = []
         if tools_enabled:
-            selector_messages = [
-                {"role": "system", "content": TOOL_SELECTOR_INSTRUCTIONS},
-                {
-                    "role": "user",
-                    "content": (
-                        f"{grounding_query(request)}\n\n"
-                        f"LATEST USER REQUEST: {request.text.strip()}"
-                    ),
-                },
-            ]
-            selector_kwargs = self._request_kwargs(selector_messages, profile)
-            selector_kwargs["temperature"] = 0
-            selector_kwargs["max_tokens"] = 160
-            selector_kwargs["tools"] = [
-                _selector_schema(tuple(available.values()), require_tool)
-            ]
-            selector_kwargs["tool_choice"] = {
-                "type": "function",
-                "function": {"name": SELECTOR_NAME},
-            }
-            selector_content, selector_calls = await self._collect_selector(
-                selector_kwargs
+            selector_content, call = await self._select_tool(
+                request, profile, tuple(available.values()), require_tool
             )
-            if len(selector_calls) != 1:
-                raise RuntimeError("Apertus did not return one native selector call.")
-            try:
-                call = _parse_selector_call(
-                    selector_calls[0],
-                    tuple(available.values()),
-                    require_tool=require_tool,
-                )
-            except ToolValidationError:
-                correction_messages = [
-                    *selector_messages,
-                    {
-                        "role": "user",
-                        "content": (
-                            "The previous selector payload was invalid. Return only "
-                            "one valid forced selector function call."
-                        ),
-                    },
-                ]
-                correction_kwargs = self._request_kwargs(
-                    correction_messages, profile
-                )
-                correction_kwargs["temperature"] = 0
-                correction_kwargs["max_tokens"] = 160
-                correction_kwargs["tools"] = selector_kwargs["tools"]
-                correction_kwargs["tool_choice"] = selector_kwargs["tool_choice"]
-                _, selector_calls = await self._collect_selector(correction_kwargs)
-                if len(selector_calls) != 1:
-                    raise RuntimeError(
-                        "Apertus did not correct its native selector call."
-                    )
-                call = _parse_selector_call(
-                    selector_calls[0],
-                    tuple(available.values()),
-                    require_tool=require_tool,
-                )
             if call is not None:
                 result = await execute_tool(call)
                 selected_tools.append(call.name)
@@ -255,17 +202,74 @@ class VllmGateway:
                 )
 
         final_kwargs = self._request_kwargs(messages, profile)
-        content, unexpected_calls = await self._collect_stream(final_kwargs)
-        if unexpected_calls:
-            raise RuntimeError("Apertus returned a tool call after tool execution.")
-        if not content.strip():
-            raise RuntimeError("Apertus returned an empty response.")
+        content, _ = await self._collect_stream(final_kwargs)
         return ModelCompletion(
             answer=content,
             citations=tuple(citations),
             grounding_sources=tuple(grounding_sources),
             selected_tools=tuple(selected_tools),
         )
+
+    @traced("apertus.tool_selection")
+    async def _select_tool(
+        self,
+        request: ChatRequest,
+        profile: ChatProfile,
+        tools: tuple[ToolSpec, ...],
+        require_tool: bool,
+    ) -> tuple[str, ToolCall | None]:
+        set_attributes(**{
+            "apertus.correlation_id": request.correlation_id,
+            "apertus.available_tools": tuple(spec.name for spec in tools),
+            "apertus.tool_required": require_tool,
+            "apertus.selector_correction_count": 0,
+        })
+        selector_messages = [
+            {"role": "system", "content": TOOL_SELECTOR_INSTRUCTIONS},
+            {
+                "role": "user",
+                "content": (
+                    f"{grounding_query(request)}\n\n"
+                    f"LATEST USER REQUEST: {request.text.strip()}"
+                ),
+            },
+        ]
+        selector_kwargs = self._request_kwargs(selector_messages, profile)
+        selector_kwargs["temperature"] = 0
+        selector_kwargs["max_tokens"] = 160
+        selector_kwargs["tools"] = [_selector_schema(tools, require_tool)]
+        selector_kwargs["tool_choice"] = {
+            "type": "function",
+            "function": {"name": SELECTOR_NAME},
+        }
+        selector_content, selector_calls = await self._collect_selector(selector_kwargs)
+        if len(selector_calls) != 1:
+            raise RuntimeError("Apertus did not return one native selector call.")
+        try:
+            call = _parse_selector_call(selector_calls[0], tools, require_tool=require_tool)
+        except ToolValidationError:
+            set_attributes(**{"apertus.selector_correction_count": 1})
+            correction_messages = [
+                *selector_messages,
+                {
+                    "role": "user",
+                    "content": (
+                        "The previous selector payload was invalid. Return only "
+                        "one valid forced selector function call."
+                    ),
+                },
+            ]
+            correction_kwargs = self._request_kwargs(correction_messages, profile)
+            correction_kwargs["temperature"] = 0
+            correction_kwargs["max_tokens"] = 160
+            correction_kwargs["tools"] = selector_kwargs["tools"]
+            correction_kwargs["tool_choice"] = selector_kwargs["tool_choice"]
+            selector_content, selector_calls = await self._collect_selector(correction_kwargs)
+            if len(selector_calls) != 1:
+                raise RuntimeError("Apertus did not correct its native selector call.")
+            call = _parse_selector_call(selector_calls[0], tools, require_tool=require_tool)
+        set_attributes(**{"apertus.selected_tool": call.name if call else "none"})
+        return selector_content, call
 
     def _request_kwargs(
         self, messages: list[dict[str, Any]], profile: ChatProfile
@@ -283,12 +287,31 @@ class VllmGateway:
             },
         }
 
+    def _trace_request(self, request: dict[str, Any]) -> None:
+        set_attributes(**{
+            "gen_ai.provider.name": "vllm",
+            "gen_ai.request.model": self._model,
+            "gen_ai.request.max_tokens": request["max_tokens"],
+            "gen_ai.request.temperature": request["temperature"],
+            "apertus.stream": request["stream"],
+            "apertus.profile": "Thinking" if request["extra_body"]["chat_template_kwargs"]["enable_thinking"] else "Tools",
+        })
+        record_messages("gen_ai.input.messages", request["messages"])
+
+    @traced(
+        "apertus.generate",
+        kind=SpanKind.CLIENT,
+        attributes={"gen_ai.operation.name": "chat"},
+    )
     async def _collect_stream(
         self, kwargs: dict[str, Any]
     ) -> tuple[str, list[dict[str, str]]]:
+        started = time.perf_counter()
+        request = {**kwargs, "stream_options": {"include_usage": True}}
+        self._trace_request(request)
         stream = await self._circuit_breaker.call(
             lambda: retry_async(
-                lambda: self._client.chat.completions.create(**kwargs),
+                lambda: self._client.chat.completions.create(**request),
                 is_retryable=is_retryable_service_error,
                 policy=self._retry_policy,
             ),
@@ -297,39 +320,56 @@ class VllmGateway:
         content: list[str] = []
         calls: dict[int, dict[str, str]] = {}
 
-        async for chunk in stream:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if delta.content:
-                content.append(delta.content)
+        try:
+            async for chunk in stream:
+                record_response_metadata(chunk)
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    if not content:
+                        set_attributes(**{"apertus.time_to_first_content_ms": (time.perf_counter() - started) * 1000})
+                    content.append(delta.content)
 
-            for tool_call in delta.tool_calls or []:
-                call = calls.setdefault(
-                    tool_call.index,
-                    {
-                        "id": f"call_{tool_call.index}",
-                        "name": "",
-                        "arguments": "",
-                    },
-                )
-                if tool_call.id:
-                    call["id"] = tool_call.id
-                if tool_call.function and tool_call.function.name:
-                    call["name"] = tool_call.function.name
-                if tool_call.function and tool_call.function.arguments:
-                    call["arguments"] += tool_call.function.arguments
+                for tool_call in delta.tool_calls or []:
+                    call = calls.setdefault(
+                        tool_call.index,
+                        {
+                            "id": f"call_{tool_call.index}",
+                            "name": "",
+                            "arguments": "",
+                        },
+                    )
+                    if tool_call.id:
+                        call["id"] = tool_call.id
+                    if tool_call.function and tool_call.function.name:
+                        call["name"] = tool_call.function.name
+                    if tool_call.function and tool_call.function.arguments:
+                        call["arguments"] += tool_call.function.arguments
+        finally:
+            close_stream = getattr(stream, "close", None) or getattr(stream, "aclose", None)
+            if close_stream is not None:
+                await close_stream()
 
-        return (
-            "".join(content),
-            [calls[index] for index in sorted(calls)],
-        )
+        answer = "".join(content)
+        record_messages("gen_ai.output.messages", [{"role": "assistant", "content": answer}])
+        if calls:
+            raise RuntimeError("Apertus returned a tool call after tool execution.")
+        if not answer.strip():
+            raise RuntimeError("Apertus returned an empty response.")
+        return answer, []
 
+    @traced(
+        "apertus.selector",
+        kind=SpanKind.CLIENT,
+        attributes={"gen_ai.operation.name": "chat"},
+    )
     async def _collect_selector(
         self, kwargs: dict[str, Any]
     ) -> tuple[str, list[dict[str, str]]]:
         request = dict(kwargs)
         request["stream"] = False
+        self._trace_request(request)
         response = await self._circuit_breaker.call(
             lambda: retry_async(
                 lambda: self._client.chat.completions.create(**request),
@@ -338,6 +378,7 @@ class VllmGateway:
             ),
             is_failure=is_retryable_service_error,
         )
+        record_response_metadata(response)
         if not response.choices:
             raise RuntimeError("Apertus returned no selector choice.")
         message = response.choices[0].message
@@ -349,6 +390,14 @@ class VllmGateway:
             }
             for call in message.tool_calls or []
         ]
+        record_messages("gen_ai.output.messages", [{
+            "role": "assistant",
+            "content": message.content or "",
+            "tool_calls": [
+                {"id": call["id"], "function": {"name": call["name"], "arguments": call["arguments"]}}
+                for call in calls
+            ],
+        }])
         return message.content or "", calls
 
     async def aclose(self) -> None:

@@ -28,6 +28,15 @@ A100 workload profile. A separate Chainlit Container App provides the web
 experience, Microsoft Entra authentication, safety checks, adaptive web
 grounding, citations, request progress, and operational telemetry.
 
+The repository includes [architecture](docs/architecture.md),
+[security and grounding](docs/security-and-grounding.md), and
+[operations and tracing](docs/operations.md) guides.
+
+The frontend uses Python 3.13, Chainlit 2.12, and OpenAI 3. Container images and
+dependencies are pinned for reproducible builds. See the
+[frontend](src/frontend/README.md) and [inference](src/inference/README.md)
+guides for runtime requirements and configuration.
+
 The implementation adds the security and operational controls needed for a
 near-production-ready MVP. It is still an accelerator, not a production
 certification: validate capacity, regional availability, safety thresholds,
@@ -135,8 +144,9 @@ The request flow is:
 2. For other requests, Apertus receives one registry-generated native
    `select_tool` function whose enum contains the available tool names and,
    when safe, `none`.
-3. A deterministic, non-streaming selector round chooses at most one tool and
-   emits JSON arguments. Final answer generation remains streamed.
+3. A temperature-zero, non-streaming selector round chooses at most one tool
+  and emits JSON arguments. Apertus generation is streamed from vLLM but
+  buffered until safety and grounding checks finish before display.
 4. The broker rejects unknown names and invalid JSON Schema arguments, applies
    the tool timeout and one-call request limit, executes the allowlisted
    handler, and safety-screens its output.
@@ -148,15 +158,22 @@ The built-in registry contains three tools:
 
 | Tool | Apertus selects it for | Input | Key controls |
 | --- | --- | --- | --- |
-| `search_web` | Current, changing, planned, upcoming, priced, status, news, or explicitly verified public information | Standalone query, maximum 500 characters | Foundry Web Search, strict safe-result instructions, Prompt Shield, Content Safety, at most 8,000 evidence characters and five citations, retries, 120-second timeout |
+| `search_web` | Current, changing, planned, upcoming, priced, status, news, plot/synopsis, or explicitly verified public information | Selector query, maximum 500 characters; broker adds bounded request context | Foundry Web Search, strict safe-result instructions, Prompt Shield, Content Safety, at most 8,000 evidence characters and five citations, retries, 120-second tool timeout |
 | `calculator` | Deterministic arithmetic | Numeric expression, maximum 200 characters | AST-only operators, bounded complexity/exponents/results, no `eval`, 2-second timeout |
 | `get_current_time` | Current clock time or calendar date in a requested timezone | IANA timezone such as `Europe/Zurich` | IANA validation, no external network call, 2-second timeout |
 
-Explicit current or future requests cannot choose `none`. A malformed native
+Requests matching freshness, date, or published-work patterns such as `plot of`
+and `synopsis for` cannot choose `none`; Apertus still selects the tool name.
+A malformed native
 selector payload gets one bounded correction attempt; subsequent invalid,
 unknown, or extra calls fail closed. The UI displays `Apertus selected <Tool>`
 and telemetry records selection, completion, rejection, and citation counts
-without prompt or tool-result bodies.
+without prompt or tool-result bodies by default.
+
+The `Thinking` profile enables Apertus deliberation but does not enable the tool
+registry or automatic Web Search. Both profiles use the same private vLLM model
+and mandatory input/output safety checks. Hidden reasoning is not displayed or
+included in application traces.
 
 New read-only tools are added with a name, user-facing label, precise
 description, JSON Schema, timeout, call limit, and asynchronous handler. The
@@ -174,6 +191,30 @@ request field. This application therefore applies strict safe-result
 instructions before retrieval synthesis, then enforces Prompt Shield and
 Content Safety over the bounded result before Apertus can use it.
 
+## Inference Tracing
+
+The existing Application Insights exporter receives one OpenTelemetry trace per
+chat message. It connects input safety, tool selection (including `none` and
+selector correction), tool execution, Foundry search, streamed generation,
+output safety, groundedness, regeneration/fallback, and final message delivery.
+
+Model spans include latency, actual input/output token usage when returned by
+the API, response IDs, finish reasons, retry counts, and error types. Application
+spans include correlation IDs, profile, routing, selected tools, citations, and
+safety/grounding outcomes. This is client-side inference tracing, not GPU/kernel
+profiling or access to model reasoning.
+
+`TRACE_CONTENT` defaults to `false`. Set it to `true` in the **frontend process**
+to capture text messages, model answers, and tool arguments/results, unredacted.
+System/developer messages, application authentication fields, attachment payloads,
+and reasoning fields are excluded regardless of the setting. Text supplied by a
+user or returned by a tool is not scanned for secrets or personal information.
+
+No table protection/RBAC policy, retention change, or redaction is added. Content
+is visible according to existing telemetry permissions and retention settings.
+See [tracing configuration and KQL](docs/operations.md#inference-tracing) and
+[the content policy](docs/security-and-grounding.md#trace-content-policy).
+
 ## Azure Services
 
 | Azure service | Documentation | Why it is included |
@@ -187,7 +228,7 @@ Content Safety over the bounded result before Apertus can use it.
 | Azure Virtual Network and Private Link | [Container Apps networking](https://learn.microsoft.com/azure/container-apps/networking) and [Private Link](https://learn.microsoft.com/azure/private-link/private-link-overview) | Isolates runtime traffic and privately connects ACR, Azure Files, Key Vault, Foundry, and Content Safety. |
 | Microsoft Entra ID | [Container Apps authentication](https://learn.microsoft.com/azure/container-apps/authentication) | Requires tenant authentication before users can reach the Chainlit application. |
 | Managed identities for Azure resources | [Overview](https://learn.microsoft.com/entra/identity/managed-identities-azure-resources/overview) | Removes SDK credentials from containers and grants narrowly scoped access to Foundry, Content Safety, ACR, and Key Vault. |
-| Azure Monitor | [Application Insights](https://learn.microsoft.com/azure/azure-monitor/app/app-insights-overview) and [Log Analytics](https://learn.microsoft.com/azure/azure-monitor/logs/log-analytics-overview) | Captures dependency latency, failures, routing decisions, Container Apps logs, and operational alerts without logging prompt bodies. |
+| Azure Monitor | [Application Insights](https://learn.microsoft.com/azure/azure-monitor/app/app-insights-overview) and [Log Analytics](https://learn.microsoft.com/azure/azure-monitor/logs/log-analytics-overview) | Captures correlated request/model/tool spans, token counts, safety outcomes, Container Apps logs, and alerts. Text content is opt-in through `TRACE_CONTENT`. |
 | Azure Cost Management | [Budgets](https://learn.microsoft.com/azure/cost-management-billing/costs/tutorial-acm-create-budgets) | Adds resource-group budget notifications for an intentionally expensive GPU workload. |
 
 ## Security Measures
@@ -208,7 +249,7 @@ and applies least privilege, defense in depth, and private connectivity.
 | Safety boundary | Input, image, evidence, and output checks run before content reaches the browser. Prompt Shield protects retrieved evidence from indirect prompt injection. Unsafe content remains a hard block. |
 | Tool and grounding boundary | Apertus selects among allowlisted schemas. The broker validates arguments, limits execution, safety-screens outputs, preserves citations, and rejects unknown tools or uncited fallback evidence. |
 | Secret handling | Sensitive bootstrap values enter as secure ARM parameters, are stored in Key Vault, and are cleared from the local azd environment after initialization. |
-| Observability privacy | Structured telemetry records stage, duration, result, category, application correlation IDs, sanitized Foundry/APIM support request IDs, and Web Search action counts for cost analysis, but not raw prompts, attachments, evidence, answers, tokens, search queries, or secrets. |
+| Observability privacy | Metadata-only by default, including actual token counts and support IDs. `TRACE_CONTENT=true` records unredacted text prompts/answers and tool arguments/results; system/developer messages, authentication fields, attachment payloads, and reasoning fields remain excluded. |
 
 Raw audio is the explicit safety exception: MIME type and size are validated,
 but Azure AI Content Safety does not inspect its spoken content in this design.
@@ -219,6 +260,10 @@ inside an image is not OCRed and sent through Prompt Shield. Add an OCR and
 Prompt Shield stage, or disable image uploads, when untrusted screenshots or
 documents are in scope. See [Security and Grounding](docs/security-and-grounding.md)
 for the complete trust boundary and production checklist.
+
+Sign out by navigating to `/.auth/logout` on the frontend host. Easy Auth owns
+this route; the current Chainlit header has no Sign out button. Do not redirect
+logout directly to the protected home page if you want to remain signed out.
 
 ## Install Apertus v1.5 8B on Azure
 
@@ -458,6 +503,12 @@ azd up
 azd env set APERTUS_IMAGE_TAG_OVERRIDE ''
 ```
 
+For application-only updates, `azd deploy frontend --no-prompt` uses the existing
+infrastructure, but it does not run the postprovision hook that opens the ACR
+build window. The publishing host needs access to the registry data plane;
+otherwise a firewall 403 is expected. See [image promotion](docs/operations.md#image-promotion)
+before attempting a frontend-only rollout.
+
 ### Rotate application secrets
 
 Create a fresh Hugging Face token and append a new Entra credential, then run:
@@ -537,14 +588,17 @@ Bicep, so it must be deleted separately after Azure resources are removed.
 
 ```powershell
 Set-Location src/frontend
-uv sync --dev
-uv run pytest
-uv run python -m compileall app.py apertus_frontend
-uv run python safety_evaluation.py --validate-cases
+uv sync --frozen --dev
+uv run --frozen pytest
+uv run --frozen python -m compileall app.py apertus_frontend safety_evaluation.py
+uv run --frozen python safety_evaluation.py --validate-cases
 Set-Location ../..
 
 az bicep build --file infra/main.bicep
-bash -n infra/hooks/*.sh src/inference/docker-entrypoint.sh
+Get-ChildItem infra/hooks/*.sh, infra/hooks/tests/*.sh, src/inference/docker-entrypoint.sh | ForEach-Object {
+  bash -n (Resolve-Path -Relative $_.FullName).Replace('\', '/')
+  if ($LASTEXITCODE -ne 0) { throw "Shell syntax check failed: $($_.Name)" }
+}
 bash infra/hooks/tests/preprovision-test.sh
 bash infra/hooks/tests/postprovision-test.sh
 
@@ -561,6 +615,10 @@ every pull request and push to `main`. The live two-case safety probe is an
 operator release gate because it requires deployed service credentials; see
 [Security and Grounding](docs/security-and-grounding.md#security-evaluation).
 
+Tracing tests use an in-memory exporter: no Azure connection or live model is
+required. They cover trace parenting, concurrent chat isolation, token-only
+stream chunks, retries, failures, cancellation, and content inclusion/exclusion.
+
 ## Operations
 
 - [Architecture](docs/architecture.md)
@@ -571,8 +629,8 @@ operator release gate because it requires deployed service credentials; see
 
 The deployment includes an email action group, a monthly resource-group budget,
 frontend timeout alerts, and inference restart alerts. Admission control limits
-each authenticated principal to six requests per minute and four concurrent
-requests per frontend replica.
+each authenticated principal to six requests per minute per frontend replica.
+The four-request concurrency limit is shared by all users of each replica.
 
 ## License
 

@@ -184,4 +184,21 @@ if grep -q 'acr build' "${propagation_resume_log}"; then
   exit 1
 fi
 
-echo 'postprovision artifact-streaming tests passed.'
+postdeploy_log="${temp_dir}/postdeploy.log"
+env -u ingress_enabled \
+  PATH="${temp_dir}:${PATH}" \
+  MOCK_LOG="${postdeploy_log}" \
+  AZURE_CONTAINER_REGISTRY_NAME='testregistry' \
+  AZURE_RESOURCE_GROUP='test-rg' \
+  SERVICE_FRONTEND_NAME='test-frontend' \
+  SERVICE_FRONTEND_URI='' \
+  MODEL_HEALTH_TOKEN='' \
+  bash "${workspace_root}/infra/hooks/postdeploy.sh"
+close_line="$(grep -n 'acr update.*public-network-enabled false.*default-action Deny' "${postdeploy_log}" | head -n 1 | cut -d: -f1)"
+ingress_line="$(grep -n 'containerapp ingress enable' "${postdeploy_log}" | head -n 1 | cut -d: -f1)"
+if [[ -z "${close_line}" || -z "${ingress_line}" || "${close_line}" -ge "${ingress_line}" ]]; then
+  echo 'Postdeploy did not close the registry before enabling frontend ingress.' >&2
+  exit 1
+fi
+
+echo 'postprovision and postdeploy deployment tests passed.'

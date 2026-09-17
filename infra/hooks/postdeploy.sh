@@ -20,7 +20,7 @@ if [[ -z "${SERVICE_FRONTEND_NAME:-}" || -z "${AZURE_RESOURCE_GROUP:-}" ]]; then
 fi
 
 # The real frontend image and Entra provider are ready, so external ingress can open.
-$ingress_enabled='false'
+ingress_enabled='false'
 for attempt in $(seq 1 10); do
   if az containerapp ingress enable \
     --name "${SERVICE_FRONTEND_NAME}" \

@@ -147,7 +147,7 @@ module inferenceIdentity 'br/public:avm/res/managed-identity/user-assigned-ident
   }
 }
 
-module logAnalytics 'br/public:avm/res/operational-insights/workspace:0.16.0' = {
+module logAnalytics 'br/public:avm/res/operational-insights/workspace:0.16.1' = {
   name: 'log-analytics'
   params: {
     name: logAnalyticsName
@@ -168,7 +168,7 @@ module applicationInsights 'br/public:avm/res/insights/component:0.8.0' = {
   }
 }
 
-module registry 'br/public:avm/res/container-registry/registry:0.12.0' = {
+module registry 'br/public:avm/res/container-registry/registry:0.13.1' = {
   name: 'container-registry'
   params: {
     name: resolvedContainerRegistryName
@@ -179,6 +179,8 @@ module registry 'br/public:avm/res/container-registry/registry:0.12.0' = {
     azureADAuthenticationAsArmPolicyStatus: 'enabled'
     exportPolicyStatus: 'disabled'
     publicNetworkAccess: 'Disabled'
+    networkRuleSetDefaultAction: 'Deny'
+    networkRuleSetIpRules: []
     retentionPolicyDays: 15
     retentionPolicyStatus: 'enabled'
     roleAssignments: [
@@ -222,7 +224,7 @@ module registryPrivateEndpoint './modules/network/private-endpoint.bicep' = {
   }
 }
 
-module keyVault 'br/public:avm/res/key-vault/vault:0.14.0' = {
+module keyVault 'br/public:avm/res/key-vault/vault:0.14.2' = {
   name: 'key-vault'
   params: {
     name: resolvedKeyVaultName
@@ -300,7 +302,7 @@ module keyVaultPrivateEndpoint './modules/network/private-endpoint.bicep' = {
   }
 }
 
-module storage 'br/public:avm/res/storage/storage-account:0.33.0' = {
+module storage 'br/public:avm/res/storage/storage-account:0.33.1' = {
   name: 'model-storage'
   params: {
     name: resolvedStorageAccountName
@@ -352,7 +354,7 @@ module storagePrivateEndpoint './modules/network/private-endpoint.bicep' = {
   }
 }
 
-module aiServices 'br/public:avm/res/cognitive-services/account:0.17.0' = {
+module aiServices 'br/public:avm/res/cognitive-services/account:0.19.1' = {
   name: 'foundry-account'
   params: {
     kind: 'AIServices'
@@ -459,7 +461,7 @@ resource foundryProjectDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-0
   }
 }
 
-module contentSafety 'br/public:avm/res/cognitive-services/account:0.17.0' = {
+module contentSafety 'br/public:avm/res/cognitive-services/account:0.19.1' = {
   name: 'content-safety'
   params: {
     kind: 'ContentSafety'
@@ -496,12 +498,11 @@ module contentSafetyPrivateEndpoint './modules/network/private-endpoint.bicep' =
   }
 }
 
-module managedEnvironment 'br/public:avm/res/app/managed-environment:0.15.0' = {
+module managedEnvironment 'br/public:avm/res/app/managed-environment:0.16.0' = {
   name: 'container-apps-environment'
   params: {
     name: managedEnvironmentName
     location: location
-    appInsightsConnectionString: applicationInsights.outputs.connectionString
     appLogsConfiguration: {
       destination: 'log-analytics'
       logAnalyticsWorkspaceResourceId: logAnalytics.outputs.resourceId
@@ -653,7 +654,7 @@ module monthlyBudget 'br/public:avm/res/consumption/budget/rg-scope:0.1.0' = {
   }
 }
 
-module frontendTimeoutAlert 'br/public:avm/res/insights/metric-alert:0.4.0' = {
+module frontendTimeoutAlert 'br/public:avm/res/insights/metric-alert:0.4.1' = {
   name: 'frontend-timeout-alert'
   params: {
     name: take('alert-${environmentName}-frontend-timeouts', 260)
@@ -686,7 +687,7 @@ module frontendTimeoutAlert 'br/public:avm/res/insights/metric-alert:0.4.0' = {
   }
 }
 
-module inferenceRestartAlert 'br/public:avm/res/insights/metric-alert:0.4.0' = {
+module inferenceRestartAlert 'br/public:avm/res/insights/metric-alert:0.4.1' = {
   name: 'inference-restart-alert'
   params: {
     name: take('alert-${environmentName}-inference-restarts', 260)

@@ -14,6 +14,7 @@ from typing import Awaitable, Callable, Protocol
 from urllib.parse import urlparse
 from uuid import uuid4
 
+from .tracing import content_enabled, record_content, record_messages, set_attributes, trace_scope, traced
 from .tools import (
     ToolCall,
     ToolCitation,
@@ -248,6 +249,10 @@ class GroundedCompletionService:
         self._model = model
         self._additional_tools = additional_tools
 
+    @traced(
+        "apertus.request",
+        attributes={"gen_ai.operation.name": "invoke_agent", "gen_ai.agent.name": "Apertus"},
+    )
     async def complete(
         self,
         request: ChatRequest,
@@ -256,22 +261,34 @@ class GroundedCompletionService:
         on_progress: ProgressCallback | None = None,
     ) -> CompletionResult:
         started = time.perf_counter()
+        set_attributes(**{
+            "apertus.correlation_id": request.correlation_id,
+            "apertus.profile": profile.value,
+            "apertus.attachment_count": len(request.attachments),
+            "apertus.trace_content": content_enabled(),
+            "apertus.regeneration_count": 0,
+        })
         self._validate_request(request)
+        record_messages("gen_ai.input.messages", [{"role": "user", "content": request.text}])
 
         await _report_progress(on_progress, ProgressStage.CHECKING_INPUT)
         input_safety_assessment = None
-        if request.text.strip():
-            input_safety_assessment = await self._safety.screen_text(
-                request.text, purpose="user-input"
-            )
+        with trace_scope("content_safety.input"):
+            if request.text.strip():
+                input_safety_assessment = await self._safety.screen_text(
+                    request.text, purpose="user-input"
+                )
 
-        for attachment in request.attachments:
-            if attachment.is_image:
-                await self._safety.screen_image(attachment)
+            for attachment in request.attachments:
+                if attachment.is_image:
+                    await self._safety.screen_image(attachment)
 
         await _report_progress(on_progress, ProgressStage.SELECTING_TOOLS)
         query = grounding_query(request)
         route_hint = grounding_route_hint(request)
+        set_attributes(**{
+            "apertus.tool_routing": "required" if route_hint is True else "local" if route_hint is False else "auto",
+        })
 
         async def search_web(arguments: dict[str, object]) -> ToolResult:
             objective = str(arguments["query"]).strip()
@@ -291,9 +308,12 @@ class GroundedCompletionService:
             )
         )
 
+        @traced("tool.execute", attributes={"gen_ai.operation.name": "execute_tool"})
         async def execute_tool(call: ToolCall) -> ToolResult:
             try:
                 spec = tool_registry.get(call.name)
+                set_attributes(**{"gen_ai.tool.name": call.name, "gen_ai.tool.call.id": call.id})
+                record_content("gen_ai.tool.call.arguments", call.arguments_json)
                 await _report_progress(
                     on_progress, ProgressStage.USING_TOOL, spec.display_name
                 )
@@ -307,14 +327,17 @@ class GroundedCompletionService:
                     },
                 )
                 result = await tool_registry.execute(call)
+                record_content("gen_ai.tool.call.result", result.content)
+                set_attributes(**{"apertus.citation_count": len(result.citations)})
                 await self._safety.screen_text(result.content, purpose="tool-output")
-            except Exception:
-                logger.exception(
+            except Exception as exc:
+                logger.error(
                     "tool_rejected",
                     extra={
                         "custom_dimensions": {
                             "correlation_id": request.correlation_id,
                             "tool": call.name,
+                            "error_type": type(exc).__name__,
                         }
                     },
                 )
@@ -329,6 +352,7 @@ class GroundedCompletionService:
                     }
                 },
             )
+            set_attributes(**{"apertus.outcome": "completed"})
             return result
 
         grounding = GroundingPacket(summary="")
@@ -363,15 +387,17 @@ class GroundedCompletionService:
             # Groundedness Detection is a preview API and can reject an otherwise
             # supported answer, especially across languages. Retry generation
             # once, then use only the cited and policy-screened search summary.
+            set_attributes(**{"apertus.regeneration_count": 1})
             await _report_progress(on_progress, ProgressStage.REFINING)
-            retry_completion = await self._model.complete(
-                request=request,
-                profile=profile,
-                grounding=grounding,
-                tools=(),
-                execute_tool=execute_tool,
-                require_tool=False,
-            )
+            with trace_scope("apertus.regenerate"):
+                retry_completion = await self._model.complete(
+                    request=request,
+                    profile=profile,
+                    grounding=grounding,
+                    tools=(),
+                    execute_tool=execute_tool,
+                    require_tool=False,
+                )
             await _report_progress(on_progress, ProgressStage.CHECKING_OUTPUT)
             retry_grounded, _ = await self._validate_completion(
                 query=query,
@@ -425,6 +451,16 @@ class GroundedCompletionService:
             )
             model_refusal_explained = True
 
+        set_attributes(**{
+            "apertus.selected_tools": selected_tools,
+            "apertus.citation_count": len(citations),
+            "apertus.groundedness_checked": bool(grounding_sources),
+            "apertus.groundedness_result": "not_checked" if not grounding_sources else "indeterminate" if grounded is None else "grounded" if grounded else "ungrounded",
+            "apertus.groundedness_fallback_used": groundedness_fallback_used,
+            "apertus.model_refusal_explained": model_refusal_explained,
+            "apertus.outcome": "model_refusal" if model_refusal_explained else "search_summary" if groundedness_fallback_used else "completed",
+        })
+        record_messages("gen_ai.output.messages", [{"role": "assistant", "content": completion.answer}])
         logger.info(
             "completion_allowed",
             extra={
@@ -434,7 +470,7 @@ class GroundedCompletionService:
                     "attachment_count": len(request.attachments),
                     "citation_count": len(citations),
                     "selected_tools": ",".join(selected_tools),
-                    "groundedness_checked": grounded is not None,
+                    "groundedness_checked": bool(grounding_sources),
                     "groundedness_fallback_used": groundedness_fallback_used,
                     "model_refusal_explained": model_refusal_explained,
                     "duration_ms": round((time.perf_counter() - started) * 1000),
@@ -460,6 +496,7 @@ class GroundedCompletionService:
             grounding_sources=(packet.summary,),
         )
 
+    @traced("apertus.validate_output")
     async def _validate_completion(
         self,
         *,
@@ -467,7 +504,8 @@ class GroundedCompletionService:
         completion: ModelCompletion,
         grounding: GroundingPacket,
     ) -> tuple[bool | None, tuple[str, ...]]:
-        await self._safety.screen_text(completion.answer, purpose="model-output")
+        with trace_scope("content_safety.output"):
+            await self._safety.screen_text(completion.answer, purpose="model-output")
         grounding_sources = tuple(
             dict.fromkeys(
                 source
@@ -482,6 +520,7 @@ class GroundedCompletionService:
             answer=completion.answer,
             sources=grounding_sources,
         )
+        set_attributes(**{"apertus.groundedness_result": "indeterminate" if grounded is None else "grounded" if grounded else "ungrounded"})
         return grounded, grounding_sources
 
     async def _get_safe_grounding(self, query: str) -> GroundingPacket:
@@ -614,11 +653,10 @@ async def _report_progress(
         return
     try:
         await callback(stage, detail)
-    except Exception:
+    except Exception as exc:
         logger.warning(
             "progress_callback_failed",
-            extra={"custom_dimensions": {"stage": stage.value}},
-            exc_info=True,
+            extra={"custom_dimensions": {"stage": stage.value, "error_type": type(exc).__name__}},
         )
 
 

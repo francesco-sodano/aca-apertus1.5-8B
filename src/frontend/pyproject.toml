@@ -7,17 +7,18 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "azure-identity>=1.25.0,<2",
-    "azure-monitor-opentelemetry>=1.8.0,<2",
-    "chainlit==2.11.1",
+    "azure-identity>=1.25.3,<2",
+    "azure-monitor-opentelemetry>=1.8.10,<2",
+    "chainlit==2.12.0",
     "httpx>=0.28.1,<1",
-    "jsonschema>=4.25.0,<5",
-    "openai>=2.0.0,<3",
-    "tzdata>=2025.2",
+    "jsonschema>=4.26.0,<5",
+    "openai>=3.11.0,<4",
+    "opentelemetry-api>=1.44.0,<2",
+    "tzdata>=2026.3",
 ]
 
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools>=84,<85"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -26,6 +27,8 @@ py-modules = ["app", "safety_evaluation"]
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.7.0,<3",
+    "opentelemetry-sdk>=1.44.0,<2",
     "pytest>=8.4.0,<10",
     "pytest-asyncio>=1.2.0,<2",
 ]
