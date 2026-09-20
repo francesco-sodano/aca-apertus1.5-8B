@@ -23,7 +23,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["apertus_frontend"]
-py-modules = ["app", "safety_evaluation"]
+py-modules = ["app", "grounding_evaluation", "safety_evaluation"]
 
 [dependency-groups]
 dev = [

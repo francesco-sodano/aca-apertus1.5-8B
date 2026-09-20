@@ -150,9 +150,10 @@ The request flow is:
 4. The broker rejects unknown names and invalid JSON Schema arguments, applies
    the tool timeout and one-call request limit, executes the allowlisted
    handler, and safety-screens its output.
-5. Apertus receives the tool result through standard assistant tool-call and
-   `role="tool"` messages, then writes the final answer. Web results retain
-   citations and pass Prompt Shield and groundedness checks.
+5. Calculator and time results use standard assistant tool-call and
+  `role="tool"` messages. A successful Web Search instead rebuilds a fresh
+  grounded prompt from its English cited evidence brief, excluding selector
+  draft text, before Apertus writes the requested-language answer.
 
 The built-in registry contains three tools:
 
@@ -181,10 +182,17 @@ orchestration pipeline does not need tool-specific branches. See the
 [frontend tool registry](src/frontend/apertus_frontend/tools.py) and
 [frontend guide](src/frontend/README.md).
 
-Stable explanations and writing requests skip Web Search. If the preview
-groundedness detector is inconclusive after a search, the application retries
-once and can return the cited, safety-screened Web Search summary rather than
-discard a successful retrieval.
+Stable explanations and writing requests skip Web Search. Searched answers
+require complete, cited retrieval evidence. Missing or incomplete evidence gets
+up to two recovery searches; if they still fail, the application reports that it
+could not verify the request instead of answering from unsupported claims.
+
+GPT-4.1 nano deterministically compares the requested-language answer with the
+English evidence brief at temperature zero and returns a strict structured
+support decision plus an English semantic rendering. An unsupported answer gets
+one regeneration; a second failure is rejected. Content Safety Groundedness
+evaluates the English rendering as an additional advisory signal. No raw search
+summary is returned as a fallback.
 
 The public Foundry Responses `web_search` contract does not expose a SafeSearch
 request field. This application therefore applies strict safe-result
@@ -195,8 +203,9 @@ Content Safety over the bounded result before Apertus can use it.
 
 The existing Application Insights exporter receives one OpenTelemetry trace per
 chat message. It connects input safety, tool selection (including `none` and
-selector correction), tool execution, Foundry search, streamed generation,
-output safety, groundedness, regeneration/fallback, and final message delivery.
+selector correction), tool execution, Foundry search and answer validation,
+streamed generation, output safety, groundedness, optional regeneration, and
+final message delivery.
 
 Model spans include latency, actual input/output token usage when returned by
 the API, response IDs, finish reasons, retry counts, and error types. Application
@@ -299,7 +308,7 @@ Before deployment, confirm all of the following:
 - Your tenant permits you to create a single-tenant Entra app registration.
 - Sweden Central reports `Consumption-GPU-NC24-A100`, and the subscription has
   capacity for one replica.
-- The subscription has at least 10 Global Standard units for `gpt-4.1-nano` in
+- The subscription has at least 100 Global Standard units for `gpt-4.1-nano` in
   Sweden Central.
 - You accepted the Apertus terms on Hugging Face and created a read-only token.
 - You reviewed the Grounding with Bing data-boundary terms described in
@@ -590,8 +599,9 @@ Bicep, so it must be deleted separately after Azure resources are removed.
 Set-Location src/frontend
 uv sync --frozen --dev
 uv run --frozen pytest
-uv run --frozen python -m compileall app.py apertus_frontend safety_evaluation.py
+uv run --frozen python -m compileall app.py apertus_frontend grounding_evaluation.py safety_evaluation.py
 uv run --frozen python safety_evaluation.py --validate-cases
+uv run --frozen python grounding_evaluation.py --validate-cases
 Set-Location ../..
 
 az bicep build --file infra/main.bicep
@@ -611,8 +621,8 @@ OpenAI-compatible Apertus endpoint. See
 [the frontend guide](src/frontend/README.md).
 
 [GitHub Actions CI](.github/workflows/ci.yml) runs these secret-free checks on
-every pull request and push to `main`. The live two-case safety probe is an
-operator release gate because it requires deployed service credentials; see
+every pull request and push to `main`. The live safety and grounding probes are
+operator release gates because they require deployed service credentials; see
 [Security and Grounding](docs/security-and-grounding.md#security-evaluation).
 
 Tracing tests use an in-memory exporter: no Azure connection or live model is

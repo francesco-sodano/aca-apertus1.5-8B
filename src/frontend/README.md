@@ -85,6 +85,21 @@ tool's `max_calls`. A failed handler consumes its budget. Calls with invalid
 schemas are rejected before execution. Missing or malformed Content Safety
 responses fail closed rather than being accepted as a low score.
 
+Web Search accepts only complete responses with a completed search and usable
+citations. Invalid evidence gets up to two broadened, high-context recoveries
+with current-date, exact-entity, and alternate-title guidance within the tool's
+timeout. Every attempt excludes answer-format instructions and conversation
+history. The third published-work recovery uses a bounded film/reference-domain
+allowlist; other searches remain unrestricted. Provider filtering and refusals
+are not retried. It never becomes an
+uncited answer. The English evidence brief is under 150 words with a 1,200-token
+ceiling. The first Apertus answer after search uses a fresh grounded prompt and
+the user's requested language. GPT-4.1 nano then compares the answer with the
+brief deterministically at temperature zero and returns a structured support
+decision plus an English semantic rendering. Unsupported output is regenerated
+once, then rejected. Content Safety Groundedness records an additional advisory
+result without returning the brief.
+
 Built-ins are defined in [`apertus_frontend/tools.py`](apertus_frontend/tools.py):
 
 | Name | Purpose |
@@ -117,8 +132,9 @@ classifier metadata remain telemetry-only.
 ## Tracing
 
 Each Chainlit message starts an `apertus.chat` trace. The request pipeline,
-selector/correction, application tool, Foundry call, model generation, safety,
-groundedness, optional regeneration, and response delivery are nested spans.
+selector/correction, application tool, Foundry search/answer validation,
+model generation, safety, groundedness, optional regeneration, and response
+delivery are nested spans.
 Usage-only vLLM chunks supply actual token counts when available. Selector calls
 are non-streamed and trace their own returned usage. Retry events include type
 and delay, without copying dependency exception bodies.
@@ -144,7 +160,7 @@ The tracing tests use an in-memory exporter and require no Azure resources:
 
 ```powershell
 uv run --frozen pytest
-uv run --frozen python -m compileall app.py apertus_frontend safety_evaluation.py
+uv run --frozen python -m compileall app.py apertus_frontend grounding_evaluation.py safety_evaluation.py
 ```
 
 ## Safety Evaluation
@@ -163,6 +179,21 @@ Run it from this source checkout with the configured private-service access.
 It uses `Thinking` mode and does not call Foundry or initialize an Azure Monitor
 exporter. The CLI is also packaged into the frontend image and can be run as
 `python safety_evaluation.py --validate-cases` there.
+
+## Grounding Evaluation
+
+Validate the privacy-safe grounding manifest without service calls, then run its
+release gates from a configured environment:
+
+```powershell
+uv run --frozen python grounding_evaluation.py --validate-cases
+uv run --frozen python grounding_evaluation.py
+```
+
+The live gate warms inference, repeats the Odyssey/Rumantsch case five times,
+checks another sourced language, and verifies calculator, local translation,
+and Thinking paths. It reports only metadata, pattern outcomes, citations,
+tools, and latency, never prompts or answers.
 
 ## Health and Sign-Out
 

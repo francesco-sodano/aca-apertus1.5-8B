@@ -46,8 +46,8 @@ param budgetStartDate string = ''
 param deploymentMonthStart string = utcNow('yyyy-MM-01T00:00:00Z')
 
 @minValue(1)
-@description('Global Standard capacity for the Foundry grounding model deployment.')
-param groundingModelCapacity int = 10
+@description('Global Standard capacity for the GPT-4.1 grounding deployment, in thousands of tokens per minute.')
+param groundingModelCapacity int = 100
 
 @description('Tags applied to all resources.')
 param tags object = {}

@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import json
 import logging
 
 import pytest
@@ -14,6 +15,7 @@ from apertus_frontend.azure_services import (
 from apertus_frontend.pipeline import (
     Attachment,
     Citation,
+    GroundingUnavailableError,
     SafetyAssessment,
     SafetyBlockedError,
 )
@@ -32,18 +34,37 @@ class FakeCredential:
         return SimpleNamespace(token="token")
 
 
+def foundry_payload(text="Evidence"):
+    return {
+        "status": "completed",
+        "output_text": text,
+        "output": [{
+            "type": "web_search_call",
+            "status": "completed",
+            "action": {
+                "type": "search",
+                "sources": [{"type": "url", "url": "https://example.com/source"}],
+            },
+        }],
+    }
+
+
 class RecordingClient:
-    def __init__(self, payload=None, headers=None):
+    def __init__(self, payload=None, headers=None, payloads=None):
         self.body = None
+        self.bodies = []
         self.headers = headers or {}
-        self.payload = payload or {"output_text": "Evidence", "output": []}
+        self.payload = payload if payload is not None else foundry_payload()
+        self.payloads = list(payloads or [])
 
     async def post(self, url, *, headers, json, params=None):
         self.body = json
+        self.bodies.append(json)
         self.request_headers = headers
+        payload = self.payloads.pop(0) if self.payloads else self.payload
         return SimpleNamespace(
             raise_for_status=lambda: None,
-            json=lambda: self.payload,
+            json=lambda: payload,
             headers=self.headers,
         )
 
@@ -190,7 +211,7 @@ async def test_content_safety_block_preserves_rule_and_severity_for_ui():
 
 
 @pytest.mark.asyncio
-async def test_content_safety_returns_non_blocking_category_metadata():
+async def test_content_safety_returns_non_blocking_category_metadata(traced_spans):
     client = RecordingClient(
         payload={
             "userPromptAnalysis": {"attackDetected": False},
@@ -211,6 +232,12 @@ async def test_content_safety_returns_non_blocking_category_metadata():
     assert assessment == SafetyAssessment(
         category="Violence", severity=2, threshold=4
     )
+    decision = next(
+        span
+        for span in traced_spans.get_finished_spans()
+        if span.name == "content_safety.text"
+    )
+    assert decision.attributes["apertus.outcome"] == "allowed"
 
 
 @pytest.mark.asyncio
@@ -236,18 +263,88 @@ async def test_web_search_uses_model_compatible_latency_controls(
 
     assert ("reasoning" in client.body) is expects_reasoning
     assert ("text" in client.body) is expects_reasoning
-    assert "shown directly" in client.body["instructions"]
-    assert "requested language" in client.body["instructions"]
+    assert "English evidence brief" in client.body["instructions"]
+    assert "separate model renders the final answer" in client.body["instructions"]
+    assert "Missing results are not evidence" in client.body["instructions"]
     assert "strict safe-search policy" in client.body["instructions"]
-    assert client.body["tools"][0]["search_context_size"] == "low"
+    assert "under 150 words" in client.body["instructions"]
+    assert client.body["max_output_tokens"] == 1200
+    assert client.body["tools"][0]["search_context_size"] == "medium"
     assert "user_location" not in client.body["tools"][0]
     assert client.request_headers["x-ms-client-request-id"]
 
 
 @pytest.mark.asyncio
+async def test_answer_validation_preserves_claims_without_search_tools():
+    client = RecordingClient(payload={
+        "status": "completed",
+        "output_text": json.dumps({
+            "english_answer": "Odysseus returns home after the Trojan War.",
+            "supported": True,
+        }),
+        "output": [],
+    })
+    gateway = FoundryWebSearchGateway(
+        project_endpoint="https://foundry.example/api/projects/test",
+        model="gpt-4.1-nano-grounding",
+        credential=FakeCredential(),
+        client=client,
+    )
+
+    validation = await gateway.validate_answer(
+        answer="Odisseus returna a chasa suenter la guerra da Troia.",
+        evidence="Odysseus returns home after the Trojan War.",
+    )
+
+    assert validation.english_answer == "Odysseus returns home after the Trojan War."
+    assert validation.supported is True
+    assert "<EVIDENCE>" in client.body["input"]
+    assert "<ANSWER>" in client.body["input"]
+    assert "Set supported to true" in client.body["instructions"]
+    assert "Do not use model memory, correct facts" in client.body["instructions"]
+    assert "tools" not in client.body
+    assert client.body["temperature"] == 0
+    assert client.body["max_output_tokens"] == 1200
+    assert client.body["text"]["format"]["type"] == "json_schema"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["incomplete", "empty", "refusal"])
+async def test_answer_validation_fails_closed(failure):
+    payload = {
+        "status": "completed",
+        "output_text": json.dumps({
+            "english_answer": "English rendering",
+            "supported": True,
+        }),
+        "output": [],
+    }
+    if failure == "incomplete":
+        payload["status"] = "incomplete"
+    elif failure == "empty":
+        payload["output_text"] = "{}"
+    else:
+        payload["output"].append({"type": "refusal", "refusal": "Declined"})
+    client = RecordingClient(payload=payload)
+    gateway = FoundryWebSearchGateway(
+        project_endpoint="https://foundry.example/api/projects/test",
+        model="gpt-4.1-nano-grounding",
+        credential=FakeCredential(),
+        client=client,
+    )
+
+    with pytest.raises(GroundingUnavailableError) as rejected:
+        await gateway.validate_answer(answer="Answer", evidence="Evidence")
+
+    assert rejected.value.source == "Microsoft Foundry"
+    assert rejected.value.rule == "Structured evidence validation required"
+    assert len(client.bodies) == 1
+
+
+@pytest.mark.asyncio
 async def test_web_search_caps_grounding_summary_size():
     client = RecordingClient(
-        payload={"output_text": "x" * (MAX_GROUNDING_SUMMARY_CHARACTERS + 1)}
+        payload=foundry_payload("x" * (MAX_GROUNDING_SUMMARY_CHARACTERS + 1))
     )
     gateway = FoundryWebSearchGateway(
         project_endpoint="https://foundry.example/api/projects/test",
@@ -265,14 +362,8 @@ async def test_web_search_caps_grounding_summary_size():
 async def test_web_search_logs_only_support_metadata(caplog):
     client = RecordingClient(
         payload={
+            **foundry_payload(),
             "id": "resp_support_123",
-            "output_text": "Evidence",
-            "output": [
-                {
-                    "type": "web_search_call",
-                    "action": {"type": "search", "sources": []},
-                }
-            ],
         },
         headers={
             "apim-request-id": "apim_support_123",
@@ -307,12 +398,10 @@ async def test_web_search_logs_only_support_metadata(caplog):
 async def test_foundry_span_records_usage_and_optional_evidence(traced_spans, monkeypatch, capture_content):
     monkeypatch.setenv("TRACE_CONTENT", str(capture_content).lower())
     client = RecordingClient(payload={
+        **foundry_payload("Evidence text"),
         "id": "foundry-response",
         "model": "gpt-4.1-nano",
-        "status": "completed",
         "usage": {"input_tokens": 90, "output_tokens": 40},
-        "output_text": "Evidence text",
-        "output": [{"type": "web_search_call", "action": {"type": "search"}}],
     }, headers={"apim-request-id": "support-id"})
     gateway = FoundryWebSearchGateway(
         project_endpoint="https://foundry.example/api/projects/test",
@@ -328,6 +417,8 @@ async def test_foundry_span_records_usage_and_optional_evidence(traced_spans, mo
     assert span.attributes["gen_ai.response.id"] == "foundry-response"
     assert span.attributes["apertus.response_status"] == "completed"
     assert span.attributes["apertus.search_action_count"] == 1
+    assert span.attributes["apertus.evidence_status"] == "accepted"
+    assert span.attributes["apertus.evidence_attempt"] == 1
     assert span.attributes["apertus.foundry.apim_request_id"] == "support-id"
     assert ("gen_ai.output.messages" in span.attributes) is capture_content
     if capture_content:
@@ -335,6 +426,158 @@ async def test_foundry_span_records_usage_and_optional_evidence(traced_spans, mo
         assert "Evidence text" in span.attributes["gen_ai.output.messages"]
     assert "strict safe-search policy" not in span.to_json()
     assert "Bearer token" not in span.to_json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["uncited", "incomplete", "failed_search", "missing_search", "empty_text", "invalid_url"])
+async def test_invalid_search_evidence_is_retried_twice_then_rejected(failure, traced_spans):
+    payload = foundry_payload()
+    if failure == "uncited":
+        payload["output"][0]["action"]["sources"] = []
+    elif failure == "incomplete":
+        payload["status"] = "incomplete"
+        payload["incomplete_details"] = {"reason": "max_output_tokens"}
+    elif failure == "failed_search":
+        payload["output"][0]["status"] = "failed"
+    elif failure == "missing_search":
+        payload["output"] = []
+    elif failure == "empty_text":
+        payload["output_text"] = " "
+    else:
+        payload["output"][0]["action"]["sources"][0]["url"] = "not-a-url"
+    client = RecordingClient(payload=payload)
+    gateway = FoundryWebSearchGateway(
+        project_endpoint="https://foundry.example/api/projects/test",
+        model="grounding-model", credential=FakeCredential(), client=client,
+    )
+
+    with pytest.raises(GroundingUnavailableError) as rejected:
+        await gateway.search("Public fact question")
+
+    assert rejected.value.source == "Microsoft Foundry Web Search"
+    assert len(client.bodies) == 3
+    spans = traced_spans.get_finished_spans()
+    assert [span.attributes["apertus.evidence_attempt"] for span in spans] == [1, 2, 3]
+    assert all(span.attributes["apertus.evidence_status"] != "accepted" for span in spans)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evidence_status", ["content_filtered", "refused"])
+async def test_provider_policy_rejection_is_never_retried(evidence_status, traced_spans):
+    payload = foundry_payload("Withheld provider response")
+    if evidence_status == "content_filtered":
+        payload["status"] = "incomplete"
+        payload["incomplete_details"] = {"reason": "content_filter"}
+    else:
+        payload["output"].append({
+            "type": "message",
+            "content": [{"type": "refusal", "refusal": "Provider declined the request."}],
+        })
+    client = RecordingClient(payloads=[payload, foundry_payload("Must not be requested")])
+    gateway = FoundryWebSearchGateway(
+        project_endpoint="https://foundry.example/api/projects/test",
+        model="grounding-model", credential=FakeCredential(), client=client,
+    )
+
+    with pytest.raises(GroundingUnavailableError) as rejected:
+        await gateway.search("Public fact question")
+
+    assert rejected.value.retryable is False
+    assert rejected.value.source == "Microsoft Foundry Web Search"
+    assert rejected.value.rule == (
+        "Content filter" if evidence_status == "content_filtered" else "Model refusal"
+    )
+    assert len(client.bodies) == 1
+    spans = traced_spans.get_finished_spans()
+    assert len(spans) == 1
+    assert spans[0].attributes["apertus.evidence_status"] == evidence_status
+    assert spans[0].attributes["apertus.evidence_attempt"] == 1
+    assert spans[0].attributes["apertus.outcome"] == "grounding_rejected"
+
+
+@pytest.mark.asyncio
+async def test_missing_sources_recover_without_reusing_false_evidence():
+    missing = foundry_payload("The film does not exist.")
+    missing["output"][0]["action"]["sources"] = []
+    client = RecordingClient(payloads=[missing, foundry_payload("Cited film synopsis")])
+    gateway = FoundryWebSearchGateway(
+        project_endpoint="https://foundry.example/api/projects/test",
+        model="grounding-model", credential=FakeCredential(), client=client,
+    )
+
+    packet = await gateway.search("Find the film synopsis")
+
+    assert packet.summary == "Cited film synopsis"
+    assert packet.valid_citations
+    assert len(client.bodies) == 2
+    assert "fresh search" in client.bodies[1]["instructions"]
+    assert client.bodies[0]["input"] == "Find the film synopsis"
+    assert "Broaden the factual search" in client.bodies[1]["input"]
+    assert "Factual lookup:\nFind the film synopsis" in client.bodies[1]["input"]
+    assert client.bodies[0]["tools"][0]["search_context_size"] == "medium"
+    assert client.bodies[1]["tools"][0]["search_context_size"] == "high"
+    assert all("The film does not exist." not in str(body) for body in client.bodies)
+
+
+@pytest.mark.asyncio
+async def test_third_attempt_uses_alternate_entity_search():
+    missing = foundry_payload("No evidence")
+    missing["output"][0]["action"]["sources"] = []
+    client = RecordingClient(
+        payloads=[missing, missing, foundry_payload("Cited evidence")]
+    )
+    gateway = FoundryWebSearchGateway(
+        project_endpoint="https://foundry.example/api/projects/test",
+        model="grounding-model", credential=FakeCredential(), client=client,
+    )
+
+    packet = await gateway.search("Christopher Nolan The Odyssey plot")
+
+    assert packet.valid_citations
+    assert len(client.bodies) == 3
+    assert "alternate concise search formulations" in client.bodies[2]["input"]
+    assert client.bodies[2]["tools"][0]["search_context_size"] == "high"
+    assert "wikipedia.org" in client.bodies[2]["tools"][0]["filters"]["allowed_domains"]
+
+
+@pytest.mark.asyncio
+async def test_third_attempt_does_not_filter_general_current_facts():
+    missing = foundry_payload("No evidence")
+    missing["output"][0]["action"]["sources"] = []
+    client = RecordingClient(
+        payloads=[missing, missing, foundry_payload("Cited evidence")]
+    )
+    gateway = FoundryWebSearchGateway(
+        project_endpoint="https://foundry.example/api/projects/test",
+        model="grounding-model", credential=FakeCredential(), client=client,
+    )
+
+    await gateway.search("current Swiss Federal Council members")
+
+    assert "filters" not in client.bodies[2]["tools"][0]
+
+
+@pytest.mark.asyncio
+async def test_recovery_uses_only_selector_objective_not_response_requirements():
+    missing = foundry_payload("No evidence")
+    missing["output"][0]["action"]["sources"] = []
+    client = RecordingClient(payloads=[missing, foundry_payload("Cited evidence")])
+    gateway = FoundryWebSearchGateway(
+        project_endpoint="https://foundry.example/api/projects/test",
+        model="grounding-model", credential=FakeCredential(), client=client,
+    )
+    query = (
+        "Search objective selected by Apertus: Christopher Nolan The Odyssey plot\n"
+        "LATEST USER REQUEST: Answer in Rumantsch Grischun\n"
+        "Conversation context for reference resolution only: private history"
+    )
+
+    await gateway.search(query)
+
+    recovery_input = client.bodies[1]["input"]
+    assert "Christopher Nolan The Odyssey plot" in recovery_input
+    assert all("Rumantsch" not in body["input"] for body in client.bodies)
+    assert all("private history" not in body["input"] for body in client.bodies)
 
 
 @pytest.mark.asyncio
@@ -384,6 +627,8 @@ async def test_groundedness_span_records_tristate_result(traced_spans, detected,
 
     decision = next(span for span in traced_spans.get_finished_spans() if span.name == "groundedness.detect")
     assert decision.attributes["apertus.groundedness_result"] == expected
+    assert gateway._client.body["task"] == "Summarization"
+    assert "qna" not in gateway._client.body
 
 
 @pytest.mark.asyncio

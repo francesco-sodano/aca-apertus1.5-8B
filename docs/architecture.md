@@ -18,6 +18,7 @@ deployment checks, and tracing queries.
 | [settings.py](../src/frontend/apertus_frontend/settings.py) | Required endpoints/secrets and runtime defaults |
 | [config.toml](../src/frontend/.chainlit/config.toml) | Chainlit UI settings, upload allowlist, header link, and custom CSS; profiles/starters are registered in app.py |
 | [safety_evaluation.py](../src/frontend/safety_evaluation.py) | Packaged and source-checkout safety regression CLI with metadata-only console results |
+| [grounding_evaluation.py](../src/frontend/grounding_evaluation.py) | Privacy-safe release gate for repeated grounded answers, unaffected workflows, language-sensitive checks, and latency |
 | [inference entrypoint](../src/inference/docker-entrypoint.sh) | vLLM model revision, runtime flags, and secret-free dry-run command |
 | [main.bicep](../infra/main.bicep) | Azure services, identities, RBAC, private networking, caches, monitoring, and alerts |
 | [azure.yaml](../azure.yaml) | Frontend azd service plus preprovision/postprovision/postdeploy hooks |
@@ -77,17 +78,31 @@ template and skips tool selection/execution; input and output safety still run.
    selects its name. Invalid selector arguments get one correction attempt.
 4. The broker validates JSON Schema arguments, enforces a timeout and one-call
    limit, executes the selected handler, and moderates its output.
-5. Web Search makes one logical forced, low-context Responses API call to Foundry.
-   Transient retries and multiple service-side search actions are possible.
-   The returned summary is capped at 8,000 characters and citations at five.
+5. Web Search makes a forced, medium-context Responses API call to Foundry. If
+   the response is incomplete, empty, or lacks usable citations, up to two
+   high-context recoveries broaden exact-entity discovery with current-date
+   framing and alternate title/spelling formulations. Foundry receives only the
+   selector's factual objective, not response-language instructions or history.
+   The third recovery for published-work facts uses a bounded film/reference
+   domain allowlist; unrelated current-fact searches remain unrestricted.
+   Provider filtering/refusal is terminal. Transient retries and multiple
+   service-side search actions are possible.
+   Only a completed response with a completed search is accepted. The requested
+   English evidence brief is under 150 words, with a 1,200-token output budget,
+   an 8,000-character evidence cap, and at most five citations.
 6. Retrieved evidence passes Prompt Shield before Apertus receives it.
 7. Apertus generates the answer from the approved tool result and recent
-   conversation context. vLLM chunks are buffered; only the checked answer is
+   conversation context. The first post-search generation already uses the
+   grounded instructions, giving retrieved facts priority over model memory and
+   conflicting history. vLLM chunks are buffered; only the checked answer is
    subsequently streamed to the browser.
-8. Generated text passes Analyze Text. Grounded answers also pass Groundedness
-   Detection. A failed or indeterminate groundedness decision gets one bounded
-   regeneration; when that still fails, only the cited, safety-screened Foundry
-   summary can be returned.
+8. Generated text passes Analyze Text. Without another search, GPT-4.1 nano
+   compares it deterministically at temperature zero with the English evidence
+   brief and returns a structured support decision plus an English semantic
+   rendering. Unsupported output gets one bounded regeneration; a second failure
+   is rejected without a summary fallback.
+   Content Safety Groundedness evaluates the English rendering as an advisory
+   signal because the preview detector is not the cross-language release gate.
 9. Azure blocks name the service and rule. Model refusal labeling is a heuristic
     using a refusal prefix plus a nonzero input safety assessment or harm keyword;
     ordinary inability statements without that signal are not relabeled.
@@ -110,6 +125,7 @@ apertus.chat                          one SERVER span per Chainlit message
          apertus.selector                optional selector correction
       tool.execute                      selected application tool
          foundry.web_search              only for search_web
+         foundry.web_search              optional evidence recovery attempt
          content_safety.grounding
             content_safety.shieldPrompt   retrieved-evidence check
          content_safety.text             tool-output classification
@@ -117,6 +133,7 @@ apertus.chat                          one SERVER span per Chainlit message
       apertus.validate_output
          content_safety.output
             content_safety.text
+         foundry.answer_validation       structured support + English rendering
          groundedness.detect             only with grounding sources
             content_safety.detectGroundedness
       apertus.regenerate                optional groundedness recovery

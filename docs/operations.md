@@ -115,16 +115,17 @@ to the existing workspace-based Application Insights resource. Bicep configures
 `APPLICATIONINSIGHTS_CONNECTION_STRING` and `OTEL_SERVICE_NAME=apertus-frontend`.
 No new observability resource is needed for inference tracing.
 
-The legacy events remain: `completion_allowed`, `tool_selected`, `tool_completed`,
+The application logs `completion_allowed`, `tool_selected`, `tool_completed`,
 `tool_rejected`, `request_blocked`, `grounding_rejected`, `request_failed`,
-`groundedness_fallback_used`, and `web_search_completed`. Their metadata is stored
+`web_search_completed`, and `web_search_rejected`.
+Their metadata is stored
 in `customDimensions.custom_dimensions` as a stringified dictionary. New span
 attributes are directly addressable in `customDimensions` and logs emitted
 inside the traced message share its `operation_Id`. Old records with an empty or
 zero operation ID cannot be retroactively connected.
 
 `completion_allowed` means the application pipeline finished. It can include a
-model refusal or search-summary fallback, not necessarily an ordinary answer.
+model refusal, not necessarily an ordinary answer.
 `tool_completed` means tool execution and output screening succeeded. A user
 message can create a selector call, a correction, an answer call, and a
 regeneration, so request count and inference count are different measures.
@@ -186,9 +187,10 @@ See [the trace tree](architecture.md#trace-structure) for parenting. Main fields
 | `apertus.selector`, `apertus.generate` | `gen_ai.operation.name=chat`, `gen_ai.provider.name=vllm`, request/response model, response ID, returned token usage and finish reasons |
 | `apertus.generate` | `apertus.time_to_first_content_ms`, including network/retry time before the first visible content chunk; not time to first hidden reasoning token |
 | `tool.execute` | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, call ID, citations, execution outcome |
-| `foundry.web_search` | Azure OpenAI provider, model/response IDs, returned usage/status, support IDs, Web Search call/action counts, evidence size and citations |
+| `foundry.web_search` | Azure OpenAI provider, model/response IDs, returned usage/status, support IDs, Web Search call/action counts, evidence size/citations, `apertus.evidence_attempt`, and `apertus.evidence_status` |
+| `foundry.answer_validation` | No-search structured support decision and English semantic rendering; response/support IDs, usage, support outcome, and rendered length |
 | `content_safety.*` | Stage, API operation, category/severity/threshold or prompt-attack decision, HTTP status and outcome; never copies the moderation request body |
-| `groundedness.detect` | Source count and `grounded`, `ungrounded`, or `indeterminate` result |
+| `groundedness.detect` | Advisory Content Safety result over the English semantic rendering: `grounded`, `ungrounded`, or `indeterminate` |
 | `apertus.respond` | Final displayed message with source list when content is enabled; `apertus.delivery_status=sent` only after delivery finishes |
 
 Model and safety dependencies record `apertus.attempt_count`,
@@ -197,6 +199,28 @@ backoff duration. There is one span per logical model operation; attempts are
 represented by counters/events, not separate GPU/server traces. Custom span
 errors record exception type and known policy fields without dependency error
 bodies or stack traces. Handled failures also mark the root span.
+
+Invalid retrieval evidence gets at most two recovery searches, represented by
+additional `foundry.web_search` spans with their own response IDs, usage, and
+latency. `apertus.evidence_attempt` is 1, 2, or 3. Evidence status is `accepted`,
+`content_filtered`, `refused`, `incomplete_response`,
+`missing_completed_search`, `empty_evidence`, or `missing_citations`.
+Filtering/refusal is terminal and is not retried. A successful HTTP request is
+not sufficient for accepted
+evidence. Compare end-to-end chat latency for usable answers separately from
+fast failed lookups, and inspect rate-limit retries before attributing delays
+to a model.
+
+Before a release, run the packaged metadata-only grounding gate from the
+configured frontend environment:
+
+```powershell
+python grounding_evaluation.py
+```
+
+It warms the model, repeats the Odyssey/Rumantsch regression, checks another
+sourced language and unaffected local/tool/Thinking paths, and fails on missing
+citations, incorrect routing, known false-denial patterns, or excessive latency.
 
 ### Find Requests
 

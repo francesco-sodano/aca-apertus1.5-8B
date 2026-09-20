@@ -18,15 +18,20 @@ from apertus_frontend.pipeline import (
     GroundingPacket,
 )
 from apertus_frontend.vllm_gateway import (
+    TOOL_SELECTOR_INSTRUCTIONS,
     VllmGateway,
     _build_messages,
     _parse_selector_call,
 )
 from apertus_frontend.tools import (
+    ToolCall,
+    ToolCitation,
+    ToolRegistry,
     ToolResult,
     ToolValidationError,
     calculator_spec,
     current_time_spec,
+    search_web_spec,
 )
 from apertus_frontend.tracing import trace_scope
 
@@ -57,6 +62,11 @@ class FakeCompletions:
 class FakeClient:
     def __init__(self):
         self.chat = SimpleNamespace(completions=FakeCompletions())
+
+
+def test_selector_instructions_separate_search_objective_from_answer_format():
+    assert "only the factual lookup objective" in TOOL_SELECTOR_INSTRUCTIONS
+    assert "Omit requested answer language" in TOOL_SELECTOR_INSTRUCTIONS
 
 
 class TransientThenAnswerCompletions(FakeCompletions):
@@ -351,6 +361,85 @@ def test_grounded_prompt_makes_completed_retrieval_authoritative():
     assert "already searched the live public web" in system
     assert "more authoritative" in system
     assert "cannot" in system
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("request_text", "evidence"),
+    [
+        (
+            "Give me the plot of The Odyssey. Answer only in Romansh.",
+            "The Odyssey is a film directed by Christopher Nolan.",
+        ),
+        (
+            "What is the latest ExampleApp release? Answer in English.",
+            "The latest ExampleApp release is version 3.0.",
+        ),
+        (
+            "Quel est le tarif actuel ? R\u00e9ponds en fran\u00e7ais.",
+            "The current fare is CHF 12.",
+        ),
+        (
+            "Wann beginnt die Veranstaltung? Antworte auf Deutsch.",
+            "The event begins at 14:00 UTC.",
+        ),
+        (
+            "Quali sono gli orari attuali del museo? Rispondi in italiano.",
+            "The museum currently opens at 09:00 and closes at 17:00.",
+        ),
+        (
+            "Verify the latest update, then res\u00famelo en espa\u00f1ol.",
+            "The latest update adds an accessible entrance.",
+        ),
+    ],
+)
+async def test_first_search_answer_uses_authoritative_evidence_and_requested_language(
+    monkeypatch, request_text, evidence,
+):
+    client = FakeClient()
+    gateway = VllmGateway(
+        base_url="http://internal-apertus/v1", api_key="secret",
+        model="swiss-ai/Apertus-v1.5-8B", client=client,
+    )
+
+    async def search_handler(arguments):
+        return ToolResult(
+            content=evidence,
+            citations=(ToolCitation("Official source", "https://example.com/film"),),
+            grounding_sources=(evidence,),
+        )
+
+    async def select_search(*args, **kwargs):
+        return "UNVERIFIED_SELECTOR_DRAFT", ToolCall(
+            "search-1", "search_web", json.dumps({"query": request_text}),
+        )
+
+    monkeypatch.setattr(gateway, "_select_tool", select_search)
+    registry = ToolRegistry((search_web_spec(search_handler),))
+    request = ChatRequest(
+        text=request_text,
+        history=(ChatTurn("assistant", "That film does not exist."),),
+    )
+    result = await gateway.complete(
+        request=request, profile=ChatProfile.TOOLS,
+        grounding=GroundingPacket(summary=""), tools=registry.specs,
+        execute_tool=registry.execute, require_tool=True,
+    )
+
+    messages = client.chat.completions.calls[0]["messages"]
+    request_kwargs = client.chat.completions.calls[0]
+    system = messages[0]["content"]
+    assert "more authoritative than model memory" in system
+    assert "explicitly asks for another language" in system
+    assert evidence in system
+    assert "https://example.com/film" in system
+    assert messages[2]["content"][0]["text"] == request.text
+    assert messages[-1]["role"] == "user"
+    assert "UNVERIFIED_SELECTOR_DRAFT" not in json.dumps(messages)
+    assert json.dumps(messages).count(evidence) == 1
+    assert request_kwargs["temperature"] == 0
+    assert request_kwargs["max_tokens"] == 600
+    assert result.selected_tools == ("search_web",)
 
 
 @pytest.mark.asyncio

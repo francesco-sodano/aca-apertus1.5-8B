@@ -48,6 +48,8 @@ GROUNDING AND TOOLS
     estimate, complete missing facts, or present an unsupported inference as fact.
 - Answer only from the delimited GROUNDING_EVIDENCE and media supplied by the
     user in this request.
+- Treat this as a faithful, concise rendering of the evidence. Preserve its
+    uncertainty and do not add background, plot details, or examples.
 - If approved evidence is insufficient, state exactly what cannot be established
     and stop. Do not guess or fall back to conversation history.
 
@@ -108,6 +110,8 @@ Return only the forced selector function call.
 - Select Current Time only for clock time, calendar date, or timezone questions.
 - Select none only when allowed and the request is identity, writing,
   translation, explanation, transformation, or a stable fact.
+- For Web Search, put only the factual lookup objective and named entities in
+    the query. Omit requested answer language, tone, length, and formatting.
 - The word current does not mean Current Time unless clock/date/time is requested.
 - The latest user request is authoritative. If a follow-up names a new entity,
   select and formulate arguments for that new entity, not the previous one.
@@ -166,7 +170,7 @@ class VllmGateway:
         grounding_sources: list[str] = []
         selected_tools: list[str] = []
         if tools_enabled:
-            selector_content, call = await self._select_tool(
+            _, call = await self._select_tool(
                 request, profile, tuple(available.values()), require_tool
             )
             if call is not None:
@@ -177,31 +181,41 @@ class VllmGateway:
                     for citation in result.citations
                 )
                 grounding_sources.extend(result.grounding_sources)
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": selector_content or None,
-                        "tool_calls": [
-                            {
-                                "id": call.id,
-                                "type": "function",
-                                "function": {
-                                    "name": call.name,
-                                    "arguments": call.arguments_json,
-                                },
-                            }
-                        ],
-                    }
-                )
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": result.content,
-                    }
-                )
+                if grounding_sources:
+                    messages = _build_messages(
+                        request,
+                        GroundingPacket(
+                            summary="\n\n".join(grounding_sources),
+                            citations=tuple(citations),
+                        ),
+                    )
+                else:
+                    messages.extend([
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": call.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": call.name,
+                                        "arguments": call.arguments_json,
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": result.content,
+                        },
+                    ])
 
         final_kwargs = self._request_kwargs(messages, profile)
+        if grounding_sources or grounding.summary.strip():
+            final_kwargs["temperature"] = 0
+            final_kwargs["max_tokens"] = min(self._max_tokens, 600)
         content, _ = await self._collect_stream(final_kwargs)
         return ModelCompletion(
             answer=content,

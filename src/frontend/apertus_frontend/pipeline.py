@@ -92,7 +92,6 @@ class ProgressStage(StrEnum):
     USING_TOOL = "using-tool"
     GENERATING = "generating"
     REFINING = "refining"
-    USING_SEARCH_SUMMARY = "using-search-summary"
     CHECKING_OUTPUT = "checking-output"
 
 
@@ -128,10 +127,13 @@ class SafetyAssessment:
 
 
 class GroundingUnavailableError(RuntimeError):
-    def __init__(self, message: str, *, source: str, rule: str) -> None:
+    def __init__(
+        self, message: str, *, source: str, rule: str, retryable: bool = False,
+    ) -> None:
         super().__init__(message)
         self.source = source
         self.rule = rule
+        self.retryable = retryable
 
 
 @dataclass(frozen=True)
@@ -163,6 +165,12 @@ class GroundingPacket:
     @property
     def valid_citations(self) -> tuple[Citation, ...]:
         return tuple(citation for citation in self.citations if _is_web_url(citation.url))
+
+
+@dataclass(frozen=True)
+class GroundingValidation:
+    english_answer: str
+    supported: bool
 
 
 @dataclass(frozen=True)
@@ -215,6 +223,10 @@ class SafetyGateway(Protocol):
 
 class GroundingGateway(Protocol):
     async def search(self, query: str) -> GroundingPacket: ...
+
+    async def validate_answer(
+        self, *, answer: str, evidence: str
+    ) -> GroundingValidation: ...
 
 
 ProgressCallback = Callable[[ProgressStage, str | None], Awaitable[None]]
@@ -382,16 +394,23 @@ class GroundedCompletionService:
             completion=completion,
             grounding=grounding,
         )
-        groundedness_fallback_used = False
         if grounding_sources and grounded is not True:
-            # Groundedness Detection is a preview API and can reject an otherwise
-            # supported answer, especially across languages. Retry generation
-            # once, then use only the cited and policy-screened search summary.
             set_attributes(**{"apertus.regeneration_count": 1})
             await _report_progress(on_progress, ProgressStage.REFINING)
+            retry_request = ChatRequest(
+                text=(
+                    f"{request.text}\n\n"
+                    "Revision requirement: make the answer shorter. Preserve the "
+                    "requested language and format, but include only claims stated "
+                    "explicitly in the grounding evidence. Do not add background details."
+                ),
+                attachments=request.attachments,
+                history=request.history,
+                correlation_id=request.correlation_id,
+            )
             with trace_scope("apertus.regenerate"):
                 retry_completion = await self._model.complete(
-                    request=request,
+                    request=retry_request,
                     profile=profile,
                     grounding=grounding,
                     tools=(),
@@ -407,25 +426,6 @@ class GroundedCompletionService:
             if retry_grounded is True:
                 completion = retry_completion
                 grounded = True
-            elif grounding.summary.strip() and citations:
-                await _report_progress(
-                    on_progress, ProgressStage.USING_SEARCH_SUMMARY
-                )
-                await self._safety.screen_text(
-                    grounding.summary, purpose="model-output"
-                )
-                completion = ModelCompletion(answer=grounding.summary)
-                grounded = retry_grounded
-                groundedness_fallback_used = True
-                logger.warning(
-                    "groundedness_fallback_used",
-                    extra={
-                        "custom_dimensions": {
-                            "correlation_id": request.correlation_id,
-                            "citation_count": len(citations),
-                        }
-                    },
-                )
             else:
                 raise GroundingUnavailableError(
                     "The generated answer did not receive an explicit groundedness approval.",
@@ -435,8 +435,7 @@ class GroundedCompletionService:
 
         model_refusal_explained = False
         if (
-            not groundedness_fallback_used
-            and _looks_like_safety_refusal(
+            _looks_like_safety_refusal(
                 request=request,
                 answer=completion.answer,
                 assessment=input_safety_assessment,
@@ -456,9 +455,9 @@ class GroundedCompletionService:
             "apertus.citation_count": len(citations),
             "apertus.groundedness_checked": bool(grounding_sources),
             "apertus.groundedness_result": "not_checked" if not grounding_sources else "indeterminate" if grounded is None else "grounded" if grounded else "ungrounded",
-            "apertus.groundedness_fallback_used": groundedness_fallback_used,
+            "apertus.groundedness_fallback_used": False,
             "apertus.model_refusal_explained": model_refusal_explained,
-            "apertus.outcome": "model_refusal" if model_refusal_explained else "search_summary" if groundedness_fallback_used else "completed",
+            "apertus.outcome": "model_refusal" if model_refusal_explained else "completed",
         })
         record_messages("gen_ai.output.messages", [{"role": "assistant", "content": completion.answer}])
         logger.info(
@@ -471,7 +470,7 @@ class GroundedCompletionService:
                     "citation_count": len(citations),
                     "selected_tools": ",".join(selected_tools),
                     "groundedness_checked": bool(grounding_sources),
-                    "groundedness_fallback_used": groundedness_fallback_used,
+                    "groundedness_fallback_used": False,
                     "model_refusal_explained": model_refusal_explained,
                     "duration_ms": round((time.perf_counter() - started) * 1000),
                 }
@@ -515,21 +514,41 @@ class GroundedCompletionService:
         )
         if not grounding_sources:
             return None, ()
-        grounded = await self._safety.is_grounded(
-            query=query,
+        validation = await self._grounding.validate_answer(
             answer=completion.answer,
+            evidence="\n\n".join(grounding_sources),
+        )
+        set_attributes(**{
+            "apertus.groundedness_normalized": True,
+            "apertus.groundedness_normalized_characters": len(validation.english_answer),
+            "apertus.semantic_support": validation.supported,
+        })
+        detector_result = await self._safety.is_grounded(
+            query=query,
+            answer=validation.english_answer,
             sources=grounding_sources,
         )
-        set_attributes(**{"apertus.groundedness_result": "indeterminate" if grounded is None else "grounded" if grounded else "ungrounded"})
-        return grounded, grounding_sources
+        set_attributes(**{
+            "apertus.content_safety_groundedness_result": (
+                "indeterminate"
+                if detector_result is None
+                else "grounded"
+                if detector_result
+                else "ungrounded"
+            ),
+            "apertus.groundedness_result": (
+                "grounded" if validation.supported else "ungrounded"
+            ),
+        })
+        return validation.supported, grounding_sources
 
     async def _get_safe_grounding(self, query: str) -> GroundingPacket:
         packet = await self._grounding.search(query)
-        if not packet.summary.strip():
+        if not packet.summary.strip() or not packet.valid_citations:
             raise GroundingUnavailableError(
-                "Web Search returned no evidence; Apertus was not called.",
+                "Web Search returned no usable cited evidence; no answer was generated.",
                 source="Microsoft Foundry Web Search",
-                rule="Grounding evidence unavailable",
+                rule="Cited grounding evidence required",
             )
         await self._safety.screen_grounding(query, packet)
         return packet

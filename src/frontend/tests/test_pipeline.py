@@ -15,6 +15,7 @@ from apertus_frontend.pipeline import (
     GroundedCompletionService,
     GroundingPacket,
     GroundingUnavailableError,
+    GroundingValidation,
     MAX_IMAGE_BYTES,
     ModelCompletion,
     ProgressStage,
@@ -35,6 +36,7 @@ class FakeSafety:
     image_calls: int = 0
     grounding_calls: int = 0
     groundedness_sources: tuple[str, ...] = ()
+    groundedness_answer: str = ""
     assessment: SafetyAssessment | None = None
 
     async def screen_text(
@@ -58,6 +60,7 @@ class FakeSafety:
     async def is_grounded(
         self, *, query: str, answer: str, sources: tuple[str, ...]
     ) -> bool | None:
+        self.groundedness_answer = answer
         self.groundedness_sources = sources
         if self.grounded_results:
             return self.grounded_results.pop(0)
@@ -69,11 +72,27 @@ class FakeGrounding:
     packet: GroundingPacket
     calls: int = 0
     queries: list[str] = field(default_factory=list)
+    validated_answers: list[str] = field(default_factory=list)
+    validation_evidence: list[str] = field(default_factory=list)
+    validation_result: GroundingValidation = GroundingValidation(
+        english_answer="English semantic rendering",
+        supported=True,
+    )
+    validation_results: list[GroundingValidation] = field(default_factory=list)
 
     async def search(self, query: str) -> GroundingPacket:
         self.calls += 1
         self.queries.append(query)
         return self.packet
+
+    async def validate_answer(
+        self, *, answer: str, evidence: str
+    ) -> GroundingValidation:
+        self.validated_answers.append(answer)
+        self.validation_evidence.append(evidence)
+        if self.validation_results:
+            return self.validation_results.pop(0)
+        return self.validation_result
 
 
 @dataclass
@@ -210,19 +229,23 @@ async def test_harmless_model_limitation_is_not_mislabeled_as_safety():
 
 
 @pytest.mark.asyncio
-async def test_citation_free_evidence_can_still_ground_an_answer():
+@pytest.mark.parametrize("citations", [(), (Citation("Invalid source", "not-a-url"),)])
+async def test_uncited_web_evidence_is_rejected_before_answer_validation(citations):
     service, safety, grounding, model = make_service(
-        grounding=FakeGrounding(GroundingPacket(summary="No cited evidence"))
+        grounding=FakeGrounding(GroundingPacket(
+            summary="The film does not exist.", citations=citations,
+        ))
     )
 
-    result = await service.complete(
-        ChatRequest(text="What is the latest news?"), ChatProfile.TOOLS
-    )
+    with pytest.raises(GroundingUnavailableError):
+        await service.complete(
+            ChatRequest(text="Give me the plot of the film."), ChatProfile.TOOLS
+        )
 
-    assert result.citations == ()
     assert model.calls == 1
     assert grounding.calls == 1
-    assert safety.groundedness_sources == ("No cited evidence",)
+    assert safety.groundedness_sources == ()
+    assert "model-output" not in safety.text_purposes
 
 
 @pytest.mark.asyncio
@@ -286,11 +309,11 @@ async def test_ungrounded_output_without_citations_is_not_returned():
             ChatRequest(text="What is the current score?"), ChatProfile.TOOLS
         )
 
-    assert model.calls == 2
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_grounding_error_identifies_groundedness_service():
+async def test_uncited_grounding_error_identifies_web_search_service():
     service, _, _, _ = make_service(
         safety=FakeSafety(grounded=False),
         grounding=FakeGrounding(GroundingPacket(summary="Uncited evidence")),
@@ -302,8 +325,9 @@ async def test_grounding_error_identifies_groundedness_service():
         )
 
     assert rejected.value.source == (
-        "Azure AI Content Safety Groundedness Detection"
+        "Microsoft Foundry Web Search"
     )
+    assert rejected.value.rule == "Cited grounding evidence required"
 
 
 @pytest.mark.asyncio
@@ -318,13 +342,20 @@ async def test_indeterminate_groundedness_is_not_returned():
             ChatRequest(text="What is the current score?"), ChatProfile.TOOLS
         )
 
-    assert model.calls == 2
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_groundedness_retry_can_recover_a_false_negative():
-    safety = FakeSafety(grounded_results=[False, True])
-    service, _, _, model = make_service(safety=safety)
+async def test_semantic_validation_retry_can_recover_an_unsupported_answer():
+    safety = FakeSafety(grounded=False)
+    grounding = FakeGrounding(
+        safe_packet(),
+        validation_results=[
+            GroundingValidation("Unsupported first answer", supported=False),
+            GroundingValidation("Supported second answer", supported=True),
+        ],
+    )
+    service, _, _, model = make_service(safety=safety, grounding=grounding)
 
     result = await service.complete(
         ChatRequest(text="What is the current score?"), ChatProfile.TOOLS
@@ -332,41 +363,53 @@ async def test_groundedness_retry_can_recover_a_false_negative():
 
     assert result.answer == "Grounded answer"
     assert model.calls == 2
+    assert "Revision requirement: make the answer shorter" in model.requests[1].text
+    assert "include only claims stated explicitly" in model.requests[1].text
+    assert grounding.validated_answers == ["Grounded answer", "Grounded answer"]
+    assert grounding.validation_evidence == ["Verified evidence", "Verified evidence"]
+    assert safety.groundedness_answer == "Supported second answer"
 
 
 @pytest.mark.asyncio
-async def test_repeated_false_negative_returns_cited_search_summary():
-    service, _, _, model = make_service(safety=FakeSafety(grounded=False))
-
-    result = await service.complete(
-        ChatRequest(text="Who are the current council members?"),
-        ChatProfile.TOOLS,
+async def test_repeated_false_negative_fails_closed_without_summary_fallback():
+    grounding = FakeGrounding(
+        safe_packet(),
+        validation_result=GroundingValidation("Unsupported answer", supported=False),
     )
+    service, _, _, model = make_service(grounding=grounding)
 
-    assert result.answer == "Verified evidence"
-    assert result.citations == safe_packet().citations
+    with pytest.raises(GroundingUnavailableError):
+        await service.complete(
+            ChatRequest(text="Who are the current council members?"),
+            ChatProfile.TOOLS,
+        )
+
     assert model.calls == 2
 
 
 @pytest.mark.asyncio
-async def test_groundedness_recovery_reports_refinement_and_summary_fallback():
-    service, _, _, _ = make_service(safety=FakeSafety(grounded=False))
+async def test_groundedness_recovery_reports_refinement_then_fails_closed():
+    grounding = FakeGrounding(
+        safe_packet(),
+        validation_result=GroundingValidation("Unsupported answer", supported=False),
+    )
+    service, _, _, _ = make_service(grounding=grounding)
     stages: list[ProgressStage] = []
 
     async def record(stage: ProgressStage, detail: str | None) -> None:
         stages.append(stage)
 
-    await service.complete(
-        ChatRequest(text="Who are the current council members?"),
-        ChatProfile.TOOLS,
-        on_progress=record,
-    )
+    with pytest.raises(GroundingUnavailableError):
+        await service.complete(
+            ChatRequest(text="Who are the current council members?"),
+            ChatProfile.TOOLS,
+            on_progress=record,
+        )
 
-    assert stages[-4:] == [
+    assert stages[-3:] == [
         ProgressStage.CHECKING_OUTPUT,
         ProgressStage.REFINING,
         ProgressStage.CHECKING_OUTPUT,
-        ProgressStage.USING_SEARCH_SUMMARY,
     ]
 
 
@@ -548,18 +591,25 @@ async def test_safety_block_ends_request_trace_without_model_call(traced_spans):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("grounded", [False, None])
-async def test_regeneration_and_fallback_are_visible_in_request_trace(traced_spans, grounded):
-    service, _, _, _ = make_service(safety=FakeSafety(grounded=grounded))
+async def test_failed_regeneration_is_visible_and_fails_closed(traced_spans, grounded):
+    grounding = FakeGrounding(
+        safe_packet(),
+        validation_result=GroundingValidation("Unsupported answer", supported=False),
+    )
+    service, _, _, _ = make_service(
+        safety=FakeSafety(grounded=grounded), grounding=grounding,
+    )
 
-    await service.complete(ChatRequest(text="What is the current score?"), ChatProfile.TOOLS)
+    with pytest.raises(GroundingUnavailableError):
+        await service.complete(
+            ChatRequest(text="What is the current score?"), ChatProfile.TOOLS
+        )
 
     spans = traced_spans.get_finished_spans()
     root = next(span for span in spans if span.name == "apertus.request")
     assert root.attributes["apertus.regeneration_count"] == 1
-    assert root.attributes["apertus.groundedness_checked"] is True
-    assert root.attributes["apertus.groundedness_result"] == ("indeterminate" if grounded is None else "ungrounded")
-    assert root.attributes["apertus.groundedness_fallback_used"] is True
-    assert root.attributes["apertus.outcome"] == "search_summary"
+    assert root.attributes["apertus.outcome"] == "grounding_rejected"
+    assert root.attributes["error.type"] == "GroundingUnavailableError"
     assert any(span.name == "apertus.regenerate" for span in spans)
 
 
@@ -619,6 +669,48 @@ async def test_profiles_share_model_gateway_and_remain_distinct():
 
     assert model.calls == 2
     assert model.profiles == [ChatProfile.TOOLS, ChatProfile.THINKING]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", [ChatProfile.TOOLS, ChatProfile.THINKING])
+@pytest.mark.parametrize("text", [
+    "Write a short poem about a train.",
+    "Translate 'Good morning' into Italian.",
+    "Explique la gravitation en fran\u00e7ais.",
+    "Schreibe ein kurzes Gedicht.",
+    "Scrivi una breve poesia.",
+])
+async def test_non_search_completion_preserves_request_without_grounding(text, profile):
+    service, safety, grounding, model = make_service()
+    request = ChatRequest(
+        text=text,
+        history=(ChatTurn("user", "Please keep replies brief."),),
+    )
+
+    result = await service.complete(request, profile)
+
+    assert model.calls == 1
+    assert model.requests == [request]
+    assert result.answer == model.answer
+    assert result.selected_tools == ()
+    assert grounding.calls == 0
+    assert safety.groundedness_sources == ()
+
+
+@pytest.mark.asyncio
+async def test_thinking_does_not_enable_search_for_a_freshness_request():
+    service, safety, grounding, model = make_service()
+
+    result = await service.complete(
+        ChatRequest(text="Verify the current release. Answer in French."),
+        ChatProfile.THINKING,
+    )
+
+    assert model.profiles == [ChatProfile.THINKING]
+    assert model.calls == 1
+    assert result.selected_tools == ()
+    assert grounding.calls == 0
+    assert safety.groundedness_sources == ()
 
 
 @pytest.mark.asyncio

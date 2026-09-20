@@ -33,7 +33,7 @@ Prompt Shield is an independent attack-detection gate; image analysis uses its
 four-level severity output. Service errors propagate instead of bypassing safety.
 An HTTP 200 without an explicit Prompt Shield boolean or all four valid harm
 category results is an error, not approval. A malformed groundedness value stays
-indeterminate and follows the documented retry/fallback path.
+indeterminate and is retained as an advisory telemetry outcome.
 
 Apertus does not return a machine-readable policy category. The application
 labels a model refusal only when an English refusal prefix accompanies a
@@ -61,14 +61,22 @@ it reaches Apertus. Disable audio where policy requires audio moderation.
 ## Foundry Web Search
 
 The application uses the Foundry Responses API `web_search` tool with GPT-4.1
-nano, a forced tool choice, and low search context. The public API does not expose
+nano, a forced tool choice, medium initial search context, and high context only
+for the two broadened recovery attempts. The public API does not expose
 a SafeSearch field, so the request uses strict safe-result instructions and the
 returned evidence is subsequently protected by Prompt Shield and Content Safety.
 
 Controls include:
 
-- one application Web Search call per request;
+- one selected Web Search tool call per request, with at most three retrieval attempts;
+- Foundry receives only the bounded factual objective, excluding answer
+  formatting and conversation history on every attempt;
+- the third published-work recovery uses a bounded film/reference domain
+  allowlist; other search categories remain unrestricted;
 - 120-second timeout, bounded retries, and circuit breaking;
+- a 1,200-token output limit and an English evidence brief of fewer than 150 words;
+- a completed search, completed response, nonempty evidence, and usable web
+  citations required before the evidence can reach answer generation;
 - evidence capped at 8,000 characters and five deduplicated web citations;
 - no query, evidence, or answer content in telemetry by default;
 - Foundry/APIM support request identifiers and Web Search action counts for
@@ -76,11 +84,24 @@ Controls include:
 
 The one-call limit is the application's tool limit, not a guarantee of a single
 Bing transaction: the service can perform multiple search actions and transient
-retries can repeat a request. Groundedness recovery regenerates once, then can
-return the cited, safety-screened Foundry summary without an affirmative
-groundedness approval. That fallback is explicitly flagged in traces; it is not
-an approved Apertus answer. Citation-free evidence can ground a model response,
-but cannot be returned as the summary fallback.
+retries can repeat a request. Provider content-filter rejections and structured
+refusals stop immediately without a recovery search. Other incomplete, empty,
+or uncited evidence gets up to two fresh retrieval attempts; a third failure
+returns a retrieval error, not a claim that the requested entity does not exist.
+Citation-free or incomplete Web Search evidence cannot ground an answer. After
+Apertus renders the requested-language answer, GPT-4.1 nano compares it with the
+brief at temperature zero and returns a strict structured support decision plus
+an English semantic representation. Unsupported output gets one regeneration;
+a second unsupported decision returns an error without exposing the search brief
+as a fallback.
+
+Groundedness Detection is documented for
+[English content only](https://learn.microsoft.com/azure/ai-services/content-safety/concepts/groundedness#limitations),
+which is why the internal semantic representation is English. The detector's
+result is recorded as an advisory signal; the structured cross-language support
+decision is the application gate. The user-visible answer remains in the
+requested language. Neither citations nor model-based validation independently
+prove that a web source is true.
 
 Grounding with Bing is a First Party Consumption Service with separate terms and
 transaction charges. Search data can leave the Azure compliance and geographic
@@ -163,10 +184,11 @@ Run the live probe from a configured environment before release:
 uv run --project src/frontend --frozen python src/frontend/safety_evaluation.py
 ```
 
-The probe tests an Azure Content Safety block and an Apertus refusal. It outputs
-only case IDs, expected/actual blockers, rules, and pass status. It never prints
-the test prompts or model answers. This is a small release gate, not a substitute
-for a broader PyRIT or Foundry Risk and Safety evaluation campaign.
+The probe tests a direct user-input block by Azure Content Safety and an Apertus
+refusal. It outputs only case IDs, expected/actual blockers, rules, and pass
+status. It never prints the test prompts or model answers. This is a small
+release gate, not a substitute for a broader PyRIT or Foundry Risk and Safety
+evaluation campaign.
 
 The CLI requires `CONTENT_SAFETY_ENDPOINT`, `MODEL_ENDPOINT`, `VLLM_API_KEY`,
 Azure credentials with Content Safety data access, and network access to both

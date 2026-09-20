@@ -47,10 +47,13 @@ jobs:
 
       - name: Compile frontend sources
         working-directory: src/frontend
-        run: uv run --frozen python -m compileall app.py apertus_frontend safety_evaluation.py
+        run: uv run --frozen python -m compileall app.py apertus_frontend grounding_evaluation.py safety_evaluation.py
 
       - name: Validate safety evaluation manifest
         run: uv run --project src/frontend --frozen python src/frontend/safety_evaluation.py --validate-cases
+
+      - name: Validate grounding evaluation manifest
+        run: uv run --project src/frontend --frozen python src/frontend/grounding_evaluation.py --validate-cases
 
       - name: Install Bicep CLI
         run: az bicep install

@@ -349,8 +349,8 @@ async def on_message(message: cl.Message) -> None:
 
 def _grounding_error_message(error: GroundingUnavailableError) -> str:
     return (
-        f"Your message was blocked by {error.source}. "
-        f"Rule: {error.rule}."
+        f"An answer was not returned because {error.source} could not verify it. "
+        f"Reason: {error.rule}."
     )
 
 
@@ -367,8 +367,6 @@ def _progress_text(
         return f"Apertus selected {detail or 'a tool'}..."
     if stage is ProgressStage.REFINING:
         return "Tightening the answer to the sources..."
-    if stage is ProgressStage.USING_SEARCH_SUMMARY:
-        return "Using the cited search summary..."
     if stage is ProgressStage.CHECKING_OUTPUT:
         return "Checking the answer for safety and grounding..."
     if profile is ChatProfile.THINKING:

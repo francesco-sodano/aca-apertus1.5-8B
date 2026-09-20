@@ -31,7 +31,7 @@ RUN uv export --frozen --no-dev --no-emit-project --format requirements-txt --ou
 COPY --chown=appuser:appuser .chainlit/config.toml ./.chainlit/config.toml
 COPY --chown=appuser:appuser public ./public
 COPY --chown=appuser:appuser apertus_frontend ./apertus_frontend
-COPY --chown=appuser:appuser app.py chainlit.md safety_evaluation.py ./
+COPY --chown=appuser:appuser app.py chainlit.md grounding_evaluation.py safety_evaluation.py ./
 
 RUN mkdir -p /app/.files /app/.chainlit/translations \
   && chown appuser:appuser /app \

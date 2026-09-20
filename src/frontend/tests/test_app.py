@@ -49,8 +49,8 @@ def test_grounding_error_names_service_reason_and_reference() -> None:
     message = _grounding_error_message(error)
 
     assert message == (
-        "Your message was blocked by Azure AI Content Safety Groundedness "
-        "Detection. Rule: Groundedness approval required."
+        "An answer was not returned because Azure AI Content Safety Groundedness "
+        "Detection could not verify it. Reason: Groundedness approval required."
     )
 
 
