@@ -4,15 +4,18 @@ Set-StrictMode -Version Latest
 if ([string]::IsNullOrWhiteSpace($env:AZURE_CONTAINER_REGISTRY_NAME)) {
     throw 'Container Registry name is missing; the deployment build window cannot be closed.'
 }
+if ([string]::IsNullOrWhiteSpace($env:AZURE_RESOURCE_GROUP)) {
+    throw 'Resource group is missing; the deployment build window cannot be closed.'
+}
 
 # Always restore the private, export-disabled registry posture before exposure.
 az acr update --name $env:AZURE_CONTAINER_REGISTRY_NAME `
+    --resource-group $env:AZURE_RESOURCE_GROUP `
     --allow-exports false --public-network-enabled false --default-action Deny --output none
 if ($LASTEXITCODE -ne 0) { throw 'Failed to close the authenticated ACR build window.' }
 
-if ([string]::IsNullOrWhiteSpace($env:SERVICE_FRONTEND_NAME) -or
-    [string]::IsNullOrWhiteSpace($env:AZURE_RESOURCE_GROUP)) {
-    throw 'Frontend app name or resource group is missing; authenticated ingress cannot be enabled.'
+if ([string]::IsNullOrWhiteSpace($env:SERVICE_FRONTEND_NAME)) {
+    throw 'Frontend app name is missing; authenticated ingress cannot be enabled.'
 }
 
 # The real frontend image and Entra provider are ready, so external ingress can open.

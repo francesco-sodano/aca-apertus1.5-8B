@@ -32,7 +32,8 @@ azd env set HF_TOKEN '' | Out-Null
 azd env set ENTRA_CLIENT_SECRET '' | Out-Null
 azd env set VLLM_API_KEY '' | Out-Null
 
-$acrResourceId = az acr show --name $env:AZURE_CONTAINER_REGISTRY_NAME --query id --output tsv
+$acrResourceId = az acr show --name $env:AZURE_CONTAINER_REGISTRY_NAME `
+    --resource-group $env:AZURE_RESOURCE_GROUP --query id --output tsv
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($acrResourceId)) {
     throw 'Could not resolve the ACR resource ID for the RBAC gate.'
 }
@@ -60,6 +61,7 @@ try {
     # ACR Tasks is Microsoft hosted, so the private registry opens only for the build.
     Write-Host 'Opening the authenticated ACR build window.'
     az acr update --name $env:AZURE_CONTAINER_REGISTRY_NAME `
+        --resource-group $env:AZURE_RESOURCE_GROUP `
         --allow-exports true --public-network-enabled true --default-action Allow --output none
     if ($LASTEXITCODE -ne 0) { throw 'Could not open the authenticated ACR build window.' }
     $acrBuildWindowOpen = $true
@@ -88,7 +90,8 @@ if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($imageDigest)) {
 else {
     $buildSucceeded = $false
     for ($attempt = 1; $attempt -le 6; $attempt++) {
-        az acr build --registry $env:AZURE_CONTAINER_REGISTRY_NAME --image "${inferenceRepository}:${imageTag}" src/inference
+        az acr build --registry $env:AZURE_CONTAINER_REGISTRY_NAME `
+            --resource-group $env:AZURE_RESOURCE_GROUP --image "${inferenceRepository}:${imageTag}" src/inference
         if ($LASTEXITCODE -eq 0) {
             $buildSucceeded = $true
             break
@@ -199,6 +202,7 @@ catch {
         $previousPreference = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         az acr update --name $env:AZURE_CONTAINER_REGISTRY_NAME `
+            --resource-group $env:AZURE_RESOURCE_GROUP `
             --allow-exports false --public-network-enabled false --default-action Deny --output none
         $cleanupExitCode = $LASTEXITCODE
         $ErrorActionPreference = $previousPreference

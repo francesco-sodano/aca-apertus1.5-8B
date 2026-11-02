@@ -10,6 +10,15 @@ cat >"${temp_dir}/az" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'az %s\n' "$*" >>"${MOCK_LOG}"
+if [[ "$*" == 'acr show '* || "$*" == 'acr update '* || "$*" == 'acr build '* ]]; then
+  if [[ "$*" != *'--resource-group test-rg'* ]]; then
+    echo 'ACR management commands must not use the unrelated CLI resource-group default.' >&2
+    exit 1
+  fi
+fi
+if [[ "$*" == 'ad app show '* && "${MOCK_ENTRA_READ_FAIL:-false}" == 'true' ]]; then
+  exit 1
+fi
 if [[ "$*" == *'artifact-streaming operation show'* ]]; then
   operation_count="$(grep -c 'artifact-streaming operation show' "${MOCK_LOG}" || true)"
   if [[ "${MOCK_CONVERSION_EXISTS:-false}" == 'true' || "${operation_count}" -gt 1 ]]; then
@@ -133,6 +142,20 @@ if ! grep -q 'auth microsoft update' "${success_log}"; then
 fi
 if grep -q 'ingress enable' "${success_log}"; then
   echo 'Public ingress was enabled before the real frontend image deployment.' >&2
+  exit 1
+fi
+
+entra_failure_log="${temp_dir}/entra-failure.log"
+if MOCK_ENTRA_READ_FAIL='true' run_hook 'Succeeded' "${entra_failure_log}"; then
+  echo 'Expected a failed Entra redirect read to fail the hook.' >&2
+  exit 1
+fi
+if grep -qE 'ad app update|containerapp update' "${entra_failure_log}"; then
+  echo 'Authentication or app revisions changed after the Entra redirect read failed.' >&2
+  exit 1
+fi
+if ! grep -q 'acr update.*public-network-enabled false.*default-action Deny' "${entra_failure_log}"; then
+  echo 'The failed Entra redirect read did not restore the private ACR posture.' >&2
   exit 1
 fi
 

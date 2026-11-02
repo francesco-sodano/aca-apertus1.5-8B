@@ -26,6 +26,7 @@ cleanup_failed_postprovision() {
     echo 'Postprovision failed; restoring the private ACR posture.' >&2
     if ! az acr update \
       --name "${AZURE_CONTAINER_REGISTRY_NAME}" \
+      --resource-group "${AZURE_RESOURCE_GROUP}" \
       --allow-exports false \
       --public-network-enabled false \
       --default-action Deny \
@@ -45,6 +46,7 @@ azd env set VLLM_API_KEY '' >/dev/null
 
 acr_resource_id="$(az acr show \
   --name "${AZURE_CONTAINER_REGISTRY_NAME}" \
+  --resource-group "${AZURE_RESOURCE_GROUP}" \
   --query id \
   --output tsv)"
 if [[ -z "${acr_resource_id}" ]]; then
@@ -79,6 +81,7 @@ done
 echo 'Opening the authenticated ACR build window.'
 az acr update \
   --name "${AZURE_CONTAINER_REGISTRY_NAME}" \
+  --resource-group "${AZURE_RESOURCE_GROUP}" \
   --allow-exports true \
   --public-network-enabled true \
   --default-action Allow \
@@ -117,6 +120,7 @@ else
   for attempt in $(seq 1 6); do
     if az acr build \
       --registry "${AZURE_CONTAINER_REGISTRY_NAME}" \
+      --resource-group "${AZURE_RESOURCE_GROUP}" \
       --image "${inference_repository}:${image_tag}" \
       src/inference; then
       build_succeeded='true'
@@ -199,11 +203,12 @@ az containerapp secret set \
 # Preserve existing redirects while registering the generated Container Apps callback.
 callback_uri="${SERVICE_FRONTEND_URI}/.auth/login/aad/callback"
 redirect_uris=("${callback_uri}")
+existing_redirect_uris="$(az ad app show --id "${ENTRA_CLIENT_ID}" --query web.redirectUris --output tsv)"
 while IFS= read -r existing_redirect_uri; do
   if [[ -n "${existing_redirect_uri}" && "${existing_redirect_uri}" != "${callback_uri}" ]]; then
     redirect_uris+=("${existing_redirect_uri}")
   fi
-done < <(az ad app show --id "${ENTRA_CLIENT_ID}" --query web.redirectUris --output tsv)
+done <<<"${existing_redirect_uris}"
 
 az ad app update \
   --id "${ENTRA_CLIENT_ID}" \

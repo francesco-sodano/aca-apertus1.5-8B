@@ -153,7 +153,11 @@ async def healthz() -> dict[str, str]:
 async def readiness(response: Response) -> dict[str, str]:
     try:
         get_runtime()
-    except Exception:
+    except Exception as exc:
+        logger.error(
+            "readiness_failed",
+            extra={"custom_dimensions": {"error_type": type(exc).__name__}},
+        )
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return {"status": "not-ready"}
     return {"status": "ready"}
@@ -169,12 +173,25 @@ async def model_health(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
 
     model_root = runtime.settings.model_endpoint.removesuffix("/v1")
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        result = await client.get(
-            f"{model_root}/health",
-            headers={"Authorization": f"Bearer {runtime.settings.vllm_api_key}"},
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            result = await client.get(
+                f"{model_root}/health",
+                headers={"Authorization": f"Bearer {runtime.settings.vllm_api_key}"},
+            )
+    except httpx.RequestError as exc:
+        logger.warning(
+            "model_health_failed",
+            extra={"custom_dimensions": {"error_type": type(exc).__name__}},
         )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE
+        ) from exc
     if result.status_code >= 400:
+        logger.warning(
+            "model_health_failed",
+            extra={"custom_dimensions": {"status_code": result.status_code}},
+        )
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
     return {"status": "ready"}
 

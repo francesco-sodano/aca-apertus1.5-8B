@@ -1,10 +1,35 @@
 # Apertus frontend
 
 Chainlit 2.12.0 frontend for the grounded Apertus deployment.
-The image uses Python 3.13.15; CI tests both Python 3.12 and 3.13.
+The image uses Python 3.13.18 on Debian Trixie and uv 0.13.6; CI tests both
+Python 3.12 and 3.13. Chainlit currently requires Python below 3.14.
 See [the code map](../../docs/architecture.md#code-map) for module ownership.
 The [Dockerfile](Dockerfile) pins the base and build-tool images;
 [uv.lock](uv.lock) records the tested Python dependency versions.
+
+## Dependency maintenance
+
+The 2026-11-02 refresh uses OpenAI 3.42.1, Azure Identity 1.27.0, Azure Monitor
+1.8.11, and OpenTelemetry 1.45.2. All 161 locked third-party packages were
+compared with public PyPI, and all 869 artifact hashes were verified against
+its release metadata. The 155 runtime dependencies had no known published
+vulnerabilities at review time.
+
+Six transitive dependencies intentionally remain below their newest releases:
+
+| Dependency | Selected | Compatibility constraint |
+| --- | --- | --- |
+| `deprecated` | 1.3.1 | Traceloop requires below 2 |
+| `literalai` | 0.1.201 | Chainlit pins this exact release |
+| `marshmallow` | 3.26.2 | dataclasses-json requires below 4 |
+| `mcp` | 1.30.0 | Chainlit requires below 2; application MCP remains disabled |
+| `opentelemetry-instrumentation-milvus` | 0.60.0 | Newer releases require the not-yet-published semantic-conventions-ai 0.5.2 |
+| `opentelemetry-instrumentation-pinecone` | 0.60.0 | Same unavailable upstream prerequisite |
+
+Do not override those constraints just to obtain a newer version number.
+Refresh the lock with compatible upstream releases and repeat both supported
+Python test suites, packaged startup/shutdown, and live evaluation gates.
+Alternate indexes must provide artifacts matching the public lock hashes.
 
 ## Local setup
 

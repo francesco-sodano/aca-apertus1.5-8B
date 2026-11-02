@@ -2,10 +2,12 @@
 set -u
 
 : "${AZURE_CONTAINER_REGISTRY_NAME:?Container Registry name is missing; the deployment build window cannot be closed}"
+: "${AZURE_RESOURCE_GROUP:?Resource group is missing; the deployment build window cannot be closed}"
 
 # Always restore the private, export-disabled registry posture before exposure.
 if ! az acr update \
   --name "${AZURE_CONTAINER_REGISTRY_NAME}" \
+  --resource-group "${AZURE_RESOURCE_GROUP}" \
   --allow-exports false \
   --public-network-enabled false \
   --default-action Deny \
@@ -14,8 +16,8 @@ if ! az acr update \
   exit 1
 fi
 
-if [[ -z "${SERVICE_FRONTEND_NAME:-}" || -z "${AZURE_RESOURCE_GROUP:-}" ]]; then
-  echo 'Frontend app name or resource group is missing; authenticated ingress cannot be enabled.' >&2
+if [[ -z "${SERVICE_FRONTEND_NAME:-}" ]]; then
+  echo 'Frontend app name is missing; authenticated ingress cannot be enabled.' >&2
   exit 1
 fi
 

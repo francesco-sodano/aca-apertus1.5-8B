@@ -5,6 +5,10 @@ Use the [root README](../README.md) for installation, the
 [frontend guide](../src/frontend/README.md#runtime-configuration) for runtime
 environment variables. Commands below assume the intended azd environment is
 selected. Never print or export all azd values when diagnosing a deployment.
+ACR management commands in the hooks explicitly select the deployment resource
+group, so an unrelated Azure CLI default cannot redirect registry operations.
+The authentication hook stops before changing redirects if the existing Entra
+redirect list cannot be read.
 
 ## Deployment Gates
 
@@ -71,6 +75,10 @@ or hash checks to work around missing packages.
 | Frontend `/healthz/ready` | Validates runtime configuration and initializes clients without contacting the dependencies or waking the GPU |
 | Frontend `/healthz/model` | Bearer-token-protected GET to vLLM `/health`; may wake the GPU, but does not generate an answer or verify Foundry/Content Safety |
 | Inference `/health` | vLLM startup, readiness, and liveness |
+
+Configuration failures on `/healthz/ready` and dependency failures on
+`/healthz/model` return HTTP 503. Their logs record only the error type or HTTP
+status, not dependency exception bodies or credentials.
 
 Inference can take several minutes to load the model and capture graphs after
 scale-up. The first user request can pay this cold-start cost when prewarm is not

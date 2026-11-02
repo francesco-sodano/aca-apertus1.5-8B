@@ -9,6 +9,14 @@ Follow the version-specific
 Do not replace the bundle with upstream vLLM solely because the upstream parser
 exists; the 1.5 multimodal model/Transformers integration has separate requirements.
 
+Last checked on 2026-11-02: the official `latest-amd64` tag still resolves to
+the pinned image above. The newer model-repository commit
+`0be762a6a58dad2a3b3f71b2e0f46d34339fa836` changes only documentation and
+evaluation results. All 22 runtime files match the deployed immutable revision
+`a411d838600baf0e3635a3daf66fb7c55fc97bb6`, including weights, configuration,
+and tokenizer files. A newer upstream vLLM release is not a compatible-bundle
+upgrade by itself.
+
 ## Local run
 
 The runtime requires an NVIDIA GPU with a driver compatible with CUDA 13 and a
