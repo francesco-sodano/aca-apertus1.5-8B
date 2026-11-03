@@ -49,6 +49,31 @@ jobs:
         working-directory: src/frontend
         run: uv run --frozen python -m compileall app.py apertus_frontend grounding_evaluation.py safety_evaluation.py
 
+      - name: Verify cloud distribution excludes the local bonus
+        run: |
+          uv build --project src/frontend --out-dir "$RUNNER_TEMP/cloud-package"
+          python - <<'PY'
+          import os
+          import tarfile
+          import zipfile
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "cloud-package"
+          forbidden = {"app_local.py", "apertus_local", "local", "Dockerfile.local",
+                       "chainlit.local.md", "chainlit.local.toml", ".env"}
+          artifacts = [*root.glob("*.whl"), *root.glob("*.tar.gz")]
+          assert len(artifacts) == 2, artifacts
+          for artifact in artifacts:
+              if artifact.suffix == ".whl":
+                  with zipfile.ZipFile(artifact) as archive:
+                      names = archive.namelist()
+              else:
+                  with tarfile.open(artifact) as archive:
+                      names = archive.getnames()
+              assert not any(forbidden.intersection(Path(name).parts) for name in names), artifact
+              print(f"{artifact.name}: cloud-only distribution verified")
+          PY
+
       - name: Validate safety evaluation manifest
         run: uv run --project src/frontend --frozen python src/frontend/safety_evaluation.py --validate-cases
 
@@ -90,3 +115,45 @@ jobs:
 
       - name: Check inference Dockerfile
         run: docker build --check --file src/inference/Dockerfile src/inference
+
+      - name: Check optional local Dockerfile
+        run: docker build --check --file src/frontend/Dockerfile.local src/frontend
+
+      - name: Validate optional local Compose without starting services
+        run: docker compose --file local/compose.yaml config --quiet
+
+  local:
+    name: Optional local bonus, Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+        with:
+          version: "0.13.6"
+          enable-cache: true
+          cache-dependency-glob: src/frontend/local/uv.lock
+
+      - name: Install frozen local-only dependencies
+        run: uv sync --project src/frontend/local --frozen --dev --python ${{ matrix.python-version }}
+
+      - name: Run local-only CPU tests
+        run: uv run --project src/frontend/local --frozen pytest -c src/frontend/local/pyproject.toml src/frontend/local/tests -q
+
+      - name: Compile local-only sources
+        working-directory: src/frontend
+        run: uv run --project local --frozen python -m compileall app_local.py apertus_local local/prepare_ui.py

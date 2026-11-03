@@ -37,6 +37,14 @@ dependencies are pinned for reproducible builds. See the
 [frontend](src/frontend/README.md) and [inference](src/inference/README.md)
 guides for runtime requirements and configuration.
 
+For an optional **fully local RTX 5090 Laptop** setup, see
+[the local bonus guide](local/README.md). Its separate frontend and Swiss vLLM
+stack use no Azure services; the ACA workflow remains the default. The bonus
+has its own entrypoint, dependency lock, Dockerfile, and Compose project. It
+does not relax Azure authentication, moderation, or grounding requirements.
+Native image/audio input is enabled locally with documented accuracy limits;
+model weights and local configuration are not included in releases.
+
 The implementation adds the security and operational controls needed for a
 near-production-ready MVP. It is still an accelerator, not a production
 certification: validate capacity, regional availability, safety thresholds,

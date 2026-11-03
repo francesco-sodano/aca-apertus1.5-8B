@@ -31,7 +31,16 @@ Refresh the lock with compatible upstream releases and repeat both supported
 Python test suites, packaged startup/shutdown, and live evaluation gates.
 Alternate indexes must provide artifacts matching the public lock hashes.
 
-## Local setup
+## Fully local bonus
+
+The [local bonus](../../local/README.md) runs `app_local.py` and the full Swiss
+vLLM model without Azure services, authentication, moderation, or telemetry.
+Its separate image and dependency lock do not alter the cloud frontend below.
+Local modules live in the separate `apertus_local` namespace, which is not
+packaged into the cloud image or Python distribution. Use the bonus guide for
+its independent CPU tests and first-time model-cache preparation.
+
+## Cloud-connected local development
 
 ```powershell
 uv sync --frozen --dev

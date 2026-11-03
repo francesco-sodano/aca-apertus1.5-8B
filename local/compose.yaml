@@ -1,0 +1,110 @@
+name: apertus-local
+
+services:
+  inference:
+    image: ghcr.io/swiss-ai/vllm_apertus_1.5_release@sha256:d85533f251c8272218ae2e519510836376e5a335b44f2204f193018e37753bc6
+    gpus: all
+    shm_size: 4gb
+    environment:
+      HF_HOME: /models
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      DO_NOT_TRACK: "1"
+      VLLM_NO_USAGE_STATS: "1"
+      VLLM_USE_V2_MODEL_RUNNER: "0"
+      VLLM_HOST_IP: 127.0.0.1
+      VLLM_CACHE_ROOT: /models/vllm-cache
+      XDG_CACHE_HOME: /models/cache
+      TORCHINDUCTOR_CACHE_DIR: /models/torchinductor
+      CUDA_CACHE_PATH: /models/cuda
+    entrypoint: ["vllm"]
+    command:
+      - serve
+      - /models/hub/models--swiss-ai--Apertus-v1.5-8B/snapshots/a411d838600baf0e3635a3daf66fb7c55fc97bb6
+      - --served-model-name
+      - swiss-ai/Apertus-v1.5-8B
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --chat-template-content-format
+      - string
+      - --max-model-len
+      - "16384"
+      - --max-num-seqs
+      - "1"
+      - --max-num-batched-tokens
+      - "1024"
+      - --gpu-memory-utilization
+      - "0.90"
+      - --kv-cache-memory-bytes
+      - "2684354560"
+      - --kv-cache-dtype
+      - auto
+      - --cpu-offload-gb
+      - "0"
+      - --safetensors-load-strategy
+      - eager
+      - --enable-prefix-caching
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - apertus
+      - --reasoning-parser
+      - apertus
+      - --compilation-config
+      - '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1]}'
+      - --limit-mm-per-prompt
+      - '{"image":{"count":1,"width":512,"height":512},"audio":{"count":1,"length":240000}}'
+      - --mm-processor-cache-gb
+      - "0.25"
+      - --no-enable-log-requests
+    volumes:
+      - models:/models
+    networks:
+      - model
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 8m
+      retries: 20
+    stop_grace_period: 30s
+    logging:
+      options:
+        max-size: 10m
+        max-file: "2"
+
+  frontend:
+    image: apertus-local-frontend:1.5
+    build:
+      context: ../src/frontend
+      dockerfile: Dockerfile.local
+    environment:
+      LOCAL_MODEL_ENDPOINT: http://inference:8000
+      LOCAL_MAX_OUTPUT_TOKENS: "2048"
+      DO_NOT_TRACK: "1"
+      OTEL_SDK_DISABLED: "true"
+    ports:
+      - "127.0.0.1:8080:8000"
+    networks:
+      - model
+      - ui
+    depends_on:
+      inference:
+        condition: service_healthy
+    stop_grace_period: 15s
+    logging:
+      options:
+        max-size: 10m
+        max-file: "2"
+
+volumes:
+  models:
+    external: true
+    name: ${APERTUS_MODEL_VOLUME:-apertus-models}
+
+networks:
+  model:
+    internal: true
+  ui: {}

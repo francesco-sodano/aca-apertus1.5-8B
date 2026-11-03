@@ -1,0 +1,34 @@
+FROM ghcr.io/astral-sh/uv:0.13.6@sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0 AS uv
+FROM python:3.13.18-slim-trixie@sha256:76baad6037690d6e8c4397fbcaef17bca6f19eecef822b708fe8fa3417d30bb5
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_LINK_MODE=copy \
+    PATH="/app/.venv/bin:$PATH" \
+    DO_NOT_TRACK=1 \
+    OTEL_SDK_DISABLED=true
+
+COPY --from=uv /uv /bin/uv
+RUN groupadd --system --gid 10001 appuser \
+    && useradd --system --uid 10001 --gid appuser --create-home appuser
+WORKDIR /app
+COPY local/pyproject.toml local/uv.lock ./
+RUN uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file /tmp/requirements.txt >/dev/null \
+    && uv venv /app/.venv \
+    && uv pip sync --no-cache --python /app/.venv/bin/python --index-url https://pypi.tuna.tsinghua.edu.cn/simple --require-hashes /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
+COPY --chown=appuser:appuser apertus_frontend/__init__.py apertus_frontend/pipeline.py apertus_frontend/tracing.py apertus_frontend/tools.py ./apertus_frontend/
+COPY --chown=appuser:appuser apertus_local ./apertus_local
+COPY --chown=appuser:appuser app_local.py ./
+COPY --chown=appuser:appuser chainlit.local.md ./chainlit.md
+COPY --chown=appuser:appuser chainlit.local.toml ./.chainlit/config.toml
+COPY local/prepare_ui.py /tmp/prepare_ui.py
+RUN python /tmp/prepare_ui.py && rm /tmp/prepare_ui.py
+RUN mkdir -p /app/.files /app/.chainlit/translations \
+    && chown appuser:appuser /app \
+    && chown -R appuser:appuser /app/.files /app/.chainlit
+USER appuser
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz/ready', timeout=8)"]
+CMD ["chainlit", "run", "app_local.py", "--host", "0.0.0.0", "--port", "8000", "-h"]

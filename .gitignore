@@ -12,6 +12,7 @@ infra/main.json
 **/*.egg-info/
 src/frontend/build/
 src/frontend/.venv/
+src/frontend/local/.venv/
 src/frontend/.chainlit/translations/
 
 .env
